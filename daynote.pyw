@@ -57,6 +57,7 @@ EVENT_DOT = "#a19f9d"  # 月曆上「只有行程」的日期圓點
 CARD_BG = "#f7f7f7"   # 輸入框、詳細頁欄位底色：比白底略深，看得出可輸入
 EVENT_TIME_FONT = ("Microsoft JhengHei UI", 9, "bold")
 UNDO_SECONDS = 5
+ADD_LIST_OPTION = "＋ 新增清單…"  # 清單下拉選單的最後一項
 SELECTED = "#e8f0fc"  # 月曆選中日期：淡藍，和強調色一致
 DIVIDER = "#ececec"   # 清單列之間的細分隔線
 HOVER = "#f3f3f3"
@@ -73,7 +74,7 @@ TITLE_FONT = ("Microsoft JhengHei UI", 15, "bold")
 ICON_FONT = ("Segoe UI Symbol", 11)
 DEFAULT_SIZE = (380, 620)
 MIN_SIZE = (340, 480)
-CELL_W, CELL_H, HEAD_H = 50, 34, 20
+CELL_W, CELL_H, HEAD_H = 50, 38, 20
 CHILD_INDENT = 28     # 子任務卡片縮排
 # 以上像素尺寸以 100% 縮放（96 DPI）為準，啟動時由 apply_dpi_scale() 依螢幕縮放比例換算
 SCALE = 1.0
@@ -99,7 +100,7 @@ def apply_dpi_scale(root):
     """依螢幕 DPI 換算全域像素常數（字型以 pt 指定，tkinter 會自動縮放，不需處理）。"""
     global SCALE, CELL_W, CELL_H, HEAD_H, CHILD_INDENT, DEFAULT_SIZE, MIN_SIZE
     SCALE = max(root.winfo_fpixels("1i") / 96, 1.0)
-    CELL_W, CELL_H, HEAD_H, CHILD_INDENT = px(50), px(34), px(20), px(28)
+    CELL_W, CELL_H, HEAD_H, CHILD_INDENT = px(50), px(38), px(20), px(28)
     DEFAULT_SIZE = (px(380), px(620))
     MIN_SIZE = (px(340), px(480))
 WEEK_HEAD = "日一二三四五六"   # 月曆以星期日為第一欄
@@ -119,7 +120,9 @@ class ApiError(Exception):
 def load_config():
     """讀取 config.json，client_id 未填時拋出 ValueError。"""
     with open(CONFIG_PATH, encoding="utf-8") as f:
-        cfg = json.load(f)
+        # JSON 不支援註解；允許整行以 // 開頭的註解（方便保留備份設定）
+        lines = [ln for ln in f.read().splitlines() if not ln.lstrip().startswith("//")]
+    cfg = json.loads("\n".join(lines))
     if not cfg.get("client_id") or cfg["client_id"].startswith("<"):
         raise ValueError("請在 config.json 填入 client_id 與 client_secret")
     return cfg
@@ -496,6 +499,10 @@ class Google:
             if status == 400 and data.get("error") == "invalid_grant":
                 self.logout()
                 raise NeedLogin("登入已過期或權限已撤銷，請重新登入")
+            if data.get("error") == "unauthorized_client":
+                # 登入憑證是由另一個 OAuth 用戶端發出的（config.json 換過 client_id），重新登入即可
+                self.logout()
+                raise NeedLogin("config.json 的用戶端已更換，舊的登入憑證無法使用，請重新登入")
             if status != 200:
                 raise ApiError(f"更新登入狀態失敗（HTTP {status}：{data.get('error', '')}）")
 
@@ -535,6 +542,9 @@ class Google:
 
     def tasklists(self):
         return self._paged(f"{TASKS_API}/users/@me/lists", {"maxResults": 100})
+
+    def add_tasklist(self, title):
+        return self.api("POST", f"{TASKS_API}/users/@me/lists", body={"title": title})
 
     def open_tasks(self, list_id):
         # showCompleted=false：不回傳已完成任務（已完成任務才會被隱藏，因此不需要 showHidden）
@@ -771,6 +781,45 @@ class DatePicker:
         if self.win.winfo_exists():
             self.win.grab_release()
             self.win.destroy()
+
+
+def ask_text(parent, title, prompt, ok_text="建立"):
+    """中文按鈕的單行輸入框（tkinter 內建 simpledialog 的按鈕固定是英文）。取消回傳 None。"""
+    win = tk.Toplevel(parent)
+    win.title(title)
+    win.configure(bg=BG, padx=px(16), pady=px(12))
+    win.resizable(False, False)
+    win.transient(parent)
+    win.attributes("-topmost", True)
+    tk.Label(win, text=prompt, bg=BG, fg=TEXT, font=FONT, anchor="w").pack(fill="x")
+    entry = tk.Entry(win, font=FONT, width=24, relief="flat", bg=CARD_BG, fg=TEXT, insertbackground=TEXT,
+                     highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+    entry.pack(fill="x", pady=(px(6), px(12)), ipady=px(3))
+    result = {"value": None}
+
+    def ok(_=None):
+        result["value"] = entry.get()
+        win.destroy()
+
+    buttons = tk.Frame(win, bg=BG)
+    buttons.pack(fill="x")
+    btn_ok = tk.Label(buttons, text=ok_text, bg=ACCENT, fg="white", font=FONT, padx=px(14), pady=px(3), cursor="hand2")
+    btn_ok.pack(side="right")
+    btn_ok.bind("<Button-1>", ok)
+    btn_cancel = tk.Label(buttons, text="取消", bg=BG, fg=GRAY, font=FONT, padx=px(10), pady=px(3), cursor="hand2")
+    btn_cancel.pack(side="right", padx=(0, px(6)))
+    btn_cancel.bind("<Button-1>", lambda e: win.destroy())
+    entry.bind("<Return>", ok)
+    win.bind("<Escape>", lambda e: win.destroy())
+
+    win.update_idletasks()  # 置中在主視窗上
+    x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_reqwidth()) // 2
+    y = parent.winfo_rooty() + (parent.winfo_height() - win.winfo_reqheight()) // 3
+    win.geometry(f"+{x}+{y}")
+    entry.focus_force()
+    win.grab_set()
+    parent.wait_window(win)
+    return result["value"]
 
 
 def date_text(day, short=False):
@@ -1030,10 +1079,10 @@ class App(tk.Tk):
         self.entry.bind("<Escape>", lambda e: self.cal.focus_set())
         self.placeholder_on = False
         self._show_placeholder()
-        self.cmb_list = ttk.Combobox(bottom, state="readonly", width=10,
+        self.cmb_list = ttk.Combobox(bottom, state="disabled", width=10,  # 讀到清單後才啟用
                                      postcommand=self._raise_list_popdown)
         self.cmb_list.pack(side="right")
-        self.cmb_list.bind("<<ComboboxSelected>>", lambda e: self._remember_list())
+        self.cmb_list.bind("<<ComboboxSelected>>", lambda e: self._on_list_selected())
         Tooltip(self.cmb_list, "新增的工作要放進哪個清單")
         self.btn_new_due = tk.Label(bottom, bg=CARD_BG, fg=ACCENT, font=SMALL, cursor="hand2", padx=px(4))
         self.btn_new_due.pack(side="right", padx=(0, px(4)))
@@ -1090,12 +1139,13 @@ class App(tk.Tk):
         for row, week in enumerate(self.weeks):
             for col, day in enumerate(week):
                 x, y = col * CELL_W, HEAD_H + row * CELL_H
-                cx = x + CELL_W / 2
+                cx, cy = x + CELL_W / 2, y + px(17)
                 if day == self.selected:
-                    c.create_rectangle(x + px(3), y + px(2), x + CELL_W - px(3), y + CELL_H - px(2),
+                    # 選取框、今天的圓圈、日期數字共用同一個中心點 cy，圓圈才會在框內置中
+                    c.create_rectangle(x + px(2), cy - px(16), x + CELL_W - px(2), cy + px(16),
                                        fill=SELECTED, outline="")
                 if day == self.today:
-                    c.create_oval(cx - px(11), y + px(3), cx + px(11), y + px(25), fill=ACCENT, outline="")
+                    c.create_oval(cx - px(11), cy - px(11), cx + px(11), cy + px(11), fill=ACCENT, outline="")
                     color = "white"
                 else:
                     off = day.weekday() >= 5 or self._is_day_off(day)
@@ -1103,7 +1153,7 @@ class App(tk.Tk):
                         color = HOLIDAY_RED if off else TEXT
                     else:
                         color = HOLIDAY_RED_FADED if off else "#c8c6c4"
-                c.create_text(cx, y + px(14), text=str(day.day), fill=color, font=FONT)
+                c.create_text(cx, cy, text=str(day.day), fill=color, font=FONT)
                 names = self.holidays.get(day)
                 if names:  # 右上角三角形：紅＝放假的節日，橘＝一般節日
                     mark = HOLIDAY_RED if self._is_day_off(day) else FESTIVAL
@@ -1117,7 +1167,7 @@ class App(tk.Tk):
                         dot = RED if day < self.today else ACCENT
                     else:
                         dot = EVENT_DOT
-                    c.create_oval(cx - px(2), y + px(28), cx + px(2), y + px(32), fill=dot, outline="")
+                    c.create_oval(cx - px(2), cy + px(13), cx + px(2), cy + px(17), fill=dot, outline="")
 
     def _is_day_off(self, day):
         return any(off for _, off in self.holidays.get(day, []))
@@ -1130,6 +1180,9 @@ class App(tk.Tk):
     def _draw_list(self):
         for widget in self.list_frame.winfo_children():
             widget.destroy()
+        if not self.g.refresh_token:
+            self._draw_login_prompt()
+            return
         day = self.selected
         events = self.events.get(day, [])
         top_level = self._top_level()
@@ -1165,6 +1218,17 @@ class App(tk.Tk):
                 for task in undated:
                     self._task_with_children(task)
         self.list_canvas.yview_moveto(0)
+
+    def _draw_login_prompt(self):
+        """未登入時，清單區改顯示明確的登入提示（取代「這天沒有任務」）。"""
+        box = tk.Frame(self.list_frame, bg=BG)
+        box.pack(fill="x", pady=px(30))
+        tk.Label(box, text="尚未登入 Google", bg=BG, fg=TEXT, font=("Microsoft JhengHei UI", 12, "bold")).pack()
+        tk.Label(box, text="登入後才能讀取與新增工作", bg=BG, fg=GRAY, font=SMALL).pack(pady=(px(4), px(12)))
+        btn = tk.Label(box, text="登入 Google", bg=ACCENT, fg="white", font=FONT, padx=px(18), pady=px(5),
+                       cursor="hand2")
+        btn.pack()
+        btn.bind("<Button-1>", lambda e: self.login())
 
     def _section_header(self, text, expanded, toggle, fg=ACCENT):
         """可收合區塊的標題列（逾期、未排日期）。"""
@@ -1497,6 +1561,8 @@ class App(tk.Tk):
 
     def _show_error(self, err):
         if isinstance(err, NeedLogin):
+            self._refresh_list_values()  # 下拉選單顯示「請先登入」
+            self._draw_list()            # 清單區顯示登入提示
             self.btn_login.pack(side="left", padx=(0, 4), before=self.btn_refresh)
             self._set_status(str(err), error=True)
         elif isinstance(err, ApiError):
@@ -1541,6 +1607,46 @@ class App(tk.Tk):
         self.compact = not self.compact
         self.state_data["compact_calendar"] = self.compact
         self.redraw()
+
+    def _refresh_list_values(self):
+        """下拉選單：所有清單＋最後一項「新增清單」；尚未讀到清單（未登入）時停用。"""
+        logged_in = bool(self.g.refresh_token)
+        self.cmb_list["values"] = [lst.get("title", "") for lst in self.lists] + [ADD_LIST_OPTION]
+        self.cmb_list.config(state="readonly" if logged_in and self.lists else "disabled")
+        if not logged_in:
+            self.cmb_list.set("請先登入")
+
+    def _on_list_selected(self):
+        self.cmb_list.selection_clear()  # 選完不要留著藍色反白
+        if self.cmb_list.current() == len(self.lists):
+            self._prompt_new_list()
+        else:
+            self._remember_list()
+
+    def _select_remembered_list(self):
+        list_ids = [lst["id"] for lst in self.lists]
+        last = self.state_data.get("last_list_id")
+        self.cmb_list.current(list_ids.index(last) if last in list_ids else 0)
+
+    def _prompt_new_list(self):
+        """選了「新增清單」：先回到原本的清單，再詢問名稱並建立。"""
+        self._select_remembered_list()
+        name = ask_text(self, "新增清單", "清單名稱：")
+        name = (name or "").strip()
+        if not name:
+            return
+        self._set_status(f"建立清單「{name}」中…")
+
+        def done(created, err):
+            if err:
+                self._show_error(err)
+                return
+            self.lists.append({"id": created["id"], "title": created.get("title") or name})
+            self._refresh_list_values()
+            self.cmb_list.current(len(self.lists) - 1)
+            self._remember_list()
+            self._set_status(f"已建立清單「{name}」，新增的工作會放進這個清單")
+        self.run_bg(lambda: self.g.add_tasklist(name), done)
 
     def _remember_list(self):
         index = self.cmb_list.current()
@@ -1661,7 +1767,7 @@ class App(tk.Tk):
             return
         view, self.lists, self.tasks, self.events, self.holidays = result
         self.btn_login.pack_forget()
-        self.cmb_list["values"] = [lst.get("title", "") for lst in self.lists]
+        self._refresh_list_values()
         list_ids = [lst["id"] for lst in self.lists]
         last = self.state_data.get("last_list_id")
         if last in list_ids:
@@ -1740,8 +1846,9 @@ class App(tk.Tk):
         index = self.cmb_list.current()
         if not title:
             return
-        if index < 0:
-            self._set_status("尚未讀到任何清單，請先同步", error=True)
+        if not 0 <= index < len(self.lists):
+            msg = "請先登入 Google（右上角「登入」）" if not self.g.refresh_token else "尚未讀到任何清單，請先同步"
+            self._set_status(msg, error=True)
             return
         lst = self.lists[index]
         self._remember_list()
