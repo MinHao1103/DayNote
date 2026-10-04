@@ -10,12 +10,15 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 - 週末與國定假日紅字；右上角三角：🔺紅＝放假節日、🔸橘＝一般節日（點日期看名稱）
 - 點任務開啟詳細頁：改標題、詳細資訊、日期，新增子工作，刪除
 - 點圓圈完成（含子工作），5 秒內可「復原」
+- 提醒時間：新增時按「⏰」或在詳細頁設定，時間到在右下角跳出提醒（可「10 分鐘後」再提醒）
 - 新增時用「📅 今天 ▾」選日期，或「無日期」；清單選單最後一項「＋ 新增清單…」可建立新清單
 - Win + D 後仍留在桌面；可置頂、收合月曆
 
 ## 安裝設定
 
-需要 Windows 10/11、Python 3.10+、Google 帳號。API 個人使用免費，不需綁卡。
+需要 Windows 10/11、[Python 3.10+](https://www.python.org/downloads/)（安裝時保留預設勾選的 tcl/tk）、Google 帳號。不需要安裝其他套件或 Git。API 個人使用免費，不需綁卡。
+
+換電腦時：複製整個資料夾（含 `config.json`）後重新登入一次即可；`token.bin` 綁定原本的 Windows 帳號，無法沿用。
 
 ### 1. 建立專案
 
@@ -100,15 +103,7 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 | `F5` | 同步 |
 | `Esc` | 離開輸入框／詳細頁 |
 
-**開機自動啟動**：
-
-```bash
-./autostart.sh on       # 開啟（在 Windows「啟動」資料夾建立捷徑）
-./autostart.sh off      # 關閉
-./autostart.sh status   # 查看狀態
-```
-
-開機後以 `pythonw` 在背景執行，不會出現命令列視窗。
+**開機自動啟動**：點兩下 `autostart.bat`，選「1 開啟」或「2 關閉」（也可在命令列執行 `autostart.bat on`／`off`／`status`）。開機後在背景執行，不會出現命令列視窗。
 
 **避免每 7 天重新登入**：「目標對象」→「發布應用程式」。個人使用免審核。
 
@@ -121,6 +116,7 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 | `borderless` | `true` | `false` 改回一般視窗 |
 | `pin_to_desktop` | `true` | Win + D 後仍顯示 |
 | `holiday_calendar` | 台灣假日 | Google 公開假日日曆 ID；`""` 關閉 |
+| `desktop_reminder` | `true` | 電腦端右下角提醒；`false` 關閉 |
 
 ## 常見問題
 
@@ -137,7 +133,9 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 
 ## 限制
 
-- Google Tasks API 不支援：星號、幾點提醒、粗體等格式、圖片
+- Google Tasks API 不支援：星號、時間、粗體等格式、圖片
+- 提醒時間存在詳細資訊第一行（`⏰ 15:00`），手機 App 看得到這行字但不會推播；只有 DayNote 開著時才會提醒
+- Windows 系統通知出現時，可能暫時蓋住 DayNote 的提醒視窗
 - 日曆只讀主日曆，不能編輯
 - 節日資料來自 Google 台灣假日日曆，不含補班日
 - 子工作一律顯示在父工作下方

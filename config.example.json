@@ -3,5 +3,6 @@
   "client_secret": "<CLIENT_SECRET>",
   "ca_file": "",
   "borderless": true,
-  "pin_to_desktop": true
+  "pin_to_desktop": true,
+  "desktop_reminder": true
 }

@@ -18,6 +18,7 @@ import http.server
 import json
 import os
 import queue
+import re
 import secrets
 import ssl
 import threading
@@ -27,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import winsound
 from ctypes import wintypes
 from tkinter import messagebox, ttk
 
@@ -57,6 +59,9 @@ EVENT_DOT = "#a19f9d"  # 月曆上「只有行程」的日期圓點
 CARD_BG = "#f7f7f7"   # 輸入框、詳細頁欄位底色：比白底略深，看得出可輸入
 EVENT_TIME_FONT = ("Microsoft JhengHei UI", 9, "bold")
 UNDO_SECONDS = 5
+REMINDER_CHECK_MS = 30 * 1000    # 每 30 秒檢查一次提醒
+REMINDER_SNOOZE_MIN = 10
+REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
 ADD_LIST_OPTION = "＋ 新增清單…"  # 清單下拉選單的最後一項
 SELECTED = "#e8f0fc"  # 月曆選中日期：淡藍，和強調色一致
 DIVIDER = "#ececec"   # 清單列之間的細分隔線
@@ -234,6 +239,18 @@ def win_pin_to_desktop(widget):
             user32.SetWindowLongPtrW(_hwnd(widget), GWLP_HWNDPARENT, progman)
     except (OSError, AttributeError):
         pass  # 失敗只是 Win + D 時會跟著隱藏
+
+
+def win_is_pinned(widget):
+    """視窗的擁有者是否為 Windows 桌面（Progman）。"""
+    try:
+        user32 = _user32()
+        user32.GetWindow.argtypes = [wintypes.HWND, ctypes.c_uint]
+        user32.GetWindow.restype = wintypes.HWND
+        progman = user32.FindWindowW("Progman", None)
+        return bool(progman) and user32.GetWindow(_hwnd(widget), 4) == progman  # GW_OWNER
+    except (OSError, AttributeError):
+        return False
 
 
 def win_add_appwindow(widget):
@@ -551,9 +568,11 @@ class Google:
         return self._paged(f"{TASKS_API}/lists/{_q(list_id)}/tasks",
                            {"showCompleted": "false", "maxResults": 100})
 
-    def add_task(self, list_id, title, due, parent=None):
-        """新增工作；parent 指定時建立為該工作的子工作。"""
+    def add_task(self, list_id, title, due, parent=None, notes=None):
+        """新增工作；parent 指定時建立為該工作的子工作；notes 用來帶入「⏰ 時間」行。"""
         body = {"title": title}
+        if notes:
+            body["notes"] = notes
         if due:
             # due 只有日期有意義，時間部分固定填 00:00:00Z
             body["due"] = f"{due.isoformat()}T00:00:00.000Z"
@@ -583,6 +602,41 @@ class Google:
         return self._paged(f"{CAL_API}/calendars/{_q(calendar_id)}/events", {
             "timeMin": local_iso(start), "timeMax": local_iso(end),
             "singleEvents": "true", "orderBy": "startTime", "maxResults": 250})
+
+
+# ---- 任務時間：Google Tasks API 不能存時間，改存在詳細資訊第一行「⏰ 15:00」（方案 B）
+
+_TIME_LINE = re.compile(r"^\s*⏰\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
+
+
+def split_time_notes(notes):
+    """從詳細資訊拆出時間：回傳 (datetime.time 或 None, 去掉時間行的詳細資訊)。"""
+    lines = (notes or "").split("\n")
+    match = _TIME_LINE.match(lines[0])
+    if not match:
+        return None, notes or ""
+    return dt.time(int(match.group(1)), int(match.group(2))), "\n".join(lines[1:]).lstrip("\n")
+
+
+def join_time_notes(time_value, notes):
+    """把時間放回詳細資訊第一行；沒有時間就只回傳詳細資訊。"""
+    if not time_value:
+        return notes
+    head = f"⏰ {time_value:%H:%M}"
+    return f"{head}\n{notes}" if notes else head
+
+
+def parse_time_text(text):
+    """解析使用者輸入的時間：15:00、1500、9:05、9：05（全形冒號）。無法解析回傳 None。"""
+    match = re.match(r"^\s*(\d{1,2})\s*[:：]?\s*(\d{2})\s*$", text or "")
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    return dt.time(hour, minute) if hour < 24 and minute < 60 else None
+
+
+def time_text(time_value):
+    return f"{time_value:%H:%M}" if time_value else ""
 
 
 def _notes_preview(notes, limit=24):
@@ -683,16 +737,11 @@ class Tooltip:
             self.tip = None
 
 
-class DatePicker:
-    """小月曆日期選擇器：快捷選項（今天／明天／下週一／無日期）＋月曆。點外面或按 Esc 關閉。"""
+class _Popup:
+    """跟著某個按鈕跳出的小視窗（日期、時間選擇器共用）：點外面或按 Esc 關閉。"""
 
-    def __init__(self, app, anchor, current, on_pick, allow_none=True):
+    def __init__(self, app, anchor):
         self.app = app
-        self.on_pick = on_pick
-        base = current or dt.date.today()
-        self.view = (base.year, base.month)
-        self.current = current
-        self.allow_none = allow_none
         self.win = tk.Toplevel(app)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
@@ -705,6 +754,9 @@ class DatePicker:
         self.win.bind("<Button-1>", self._click_outside, add="+")
         self.win.focus_force()
         self.win.grab_set()  # 點視窗其他地方時，事件會先送到這裡，用來判斷是否點在外面
+
+    def _render(self):
+        raise NotImplementedError
 
     def _place(self, anchor):
         self.win.update_idletasks()
@@ -728,6 +780,27 @@ class DatePicker:
         lbl = tk.Label(parent, text=text, bg=CARD_BG, fg=fg, font=font, cursor="hand2", padx=px(4))
         lbl.bind("<Button-1>", lambda e: command())
         return lbl
+
+    def pick(self, value):
+        self.close()
+        self.on_pick(value)
+
+    def close(self):
+        if self.win.winfo_exists():
+            self.win.grab_release()
+            self.win.destroy()
+
+
+class DatePicker(_Popup):
+    """小月曆日期選擇器：快捷選項（今天／明天／下週一／無日期）＋月曆。"""
+
+    def __init__(self, app, anchor, current, on_pick, allow_none=True):
+        self.on_pick = on_pick
+        base = current or dt.date.today()
+        self.view = (base.year, base.month)
+        self.current = current
+        self.allow_none = allow_none
+        super().__init__(app, anchor)
 
     def _render(self):
         for w in self.body.winfo_children():
@@ -773,14 +846,131 @@ class DatePicker:
         self.view = (index // 12, index % 12 + 1)
         self._render()
 
-    def pick(self, day):
-        self.close()
-        self.on_pick(day)
+
+
+class TimePicker(_Popup):
+    """提醒時間選擇器：常用時間＋自訂（HH:MM，Enter 確認）＋不設時間。"""
+
+    PRESETS = ("09:00", "12:00", "15:00", "18:00", "20:00")
+
+    def __init__(self, app, anchor, current, on_pick):
+        self.on_pick = on_pick
+        self.current = current
+        super().__init__(app, anchor)
+
+    def _render(self):
+        for w in self.body.winfo_children():
+            w.destroy()
+        tk.Label(self.body, text="提醒時間（選填）", bg=CARD_BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
+        grid = tk.Frame(self.body, bg=CARD_BG)
+        grid.pack(fill="x", pady=px(4))
+        for i, text in enumerate(self.PRESETS):
+            value = parse_time_text(text)
+            selected = value == self.current
+            lbl = tk.Label(grid, text=text, bg=ACCENT if selected else CARD_BG, fg="white" if selected else TEXT,
+                           font=FONT, cursor="hand2", padx=px(6), pady=px(2))
+            lbl.grid(row=i // 3, column=i % 3, padx=px(2), pady=px(2), sticky="ew")
+            lbl.bind("<Button-1>", lambda e, v=value: self.pick(v))
+        row = tk.Frame(self.body, bg=CARD_BG)
+        row.pack(fill="x", pady=(px(2), px(4)))
+        tk.Label(row, text="自訂", bg=CARD_BG, fg=GRAY, font=SMALL).pack(side="left")
+        self.custom = tk.Entry(row, width=6, font=FONT, relief="flat", bg=BG, fg=TEXT, insertbackground=TEXT,
+                               highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+        self.custom.insert(0, time_text(self.current) or "")
+        self.custom.pack(side="left", padx=px(6))
+        self.custom.bind("<Return>", lambda e: self._pick_custom())
+        self._link(row, "確定", self._pick_custom).pack(side="left")
+        self.hint = tk.Label(self.body, text="", bg=CARD_BG, fg=RED, font=SMALL, anchor="w")
+        self.hint.pack(fill="x")
+        self._link(self.body, "不設時間", lambda: self.pick(None), fg=GRAY).pack(anchor="w")
+
+    def _pick_custom(self):
+        value = parse_time_text(self.custom.get())
+        if value is None:
+            self.hint.config(text="請輸入 HH:MM，例如 15:30")
+            return
+        self.pick(value)
+
+
+def win_work_area():
+    """主螢幕扣掉工作列的可用範圍 (left, top, right, bottom)；取不到時回傳 None。"""
+    try:
+        rect = wintypes.RECT()
+        if ctypes.WinDLL("user32").SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+            return rect.left, rect.top, rect.right, rect.bottom
+    except (OSError, AttributeError):
+        pass
+    return None
+
+
+class ReminderToast:
+    """右下角提醒小視窗（仿 Windows 通知）：時間到時跳出並播放提示音，多則時往上堆疊。"""
+
+    active = []
+    WIDTH = 300
+
+    def __init__(self, app, task, when, on_done, on_snooze):
+        self.app = app
+        win = self.win = tk.Toplevel(app)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        body = tk.Frame(win, bg=BG, padx=px(14), pady=px(10))
+        body.pack(fill="both")
+
+        head = tk.Frame(body, bg=BG)
+        head.pack(fill="x")
+        tk.Label(head, text="DayNote 提醒", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
+        close = tk.Label(head, text="✕", bg=BG, fg=GRAY, font=ICON_FONT, cursor="hand2")
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda e: self.close())
+
+        late = (dt.datetime.now() - when).total_seconds() // 60
+        when_text = f"⏰ {when:%H:%M}" + (f"（已過 {int(late)} 分鐘）" if late >= 2 else "")
+        if when.date() != dt.date.today():
+            when_text = f"⏰ {when.month}/{when.day} {when:%H:%M}"
+        tk.Label(body, text=when_text, bg=BG, fg=ACCENT, font=FONT, anchor="w").pack(fill="x", pady=(px(6), 0))
+        tk.Label(body, text=task["title"], bg=BG, fg=TEXT, font=("Microsoft JhengHei UI", 12, "bold"),
+                 anchor="w", justify="left", wraplength=px(self.WIDTH - 40)).pack(fill="x", pady=(px(2), px(10)))
+
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill="x")
+        done = tk.Label(buttons, text="✓ 完成", bg=ACCENT, fg="white", font=FONT, cursor="hand2",
+                        padx=px(12), pady=px(3))
+        done.pack(side="right")
+        done.bind("<Button-1>", lambda e: (self.close(), on_done()))
+        snooze = tk.Label(buttons, text="10 分鐘後", bg=CARD_BG, fg=TEXT, font=FONT, cursor="hand2",
+                          padx=px(12), pady=px(3), highlightthickness=1, highlightbackground=BORDER)
+        snooze.pack(side="right", padx=(0, px(8)))
+        snooze.bind("<Button-1>", lambda e: (self.close(), on_snooze()))
+
+        ReminderToast.active.append(self)
+        ReminderToast.relayout()
+        try:
+            winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        except RuntimeError:
+            pass  # 沒有音效裝置時靜音
+
+    @classmethod
+    def relayout(cls):
+        """從工作列上方開始往上堆疊所有提醒。"""
+        area = win_work_area()
+        for toast in cls.active:
+            toast.win.update_idletasks()
+        y = (area[3] if area else toast.win.winfo_screenheight() - px(48)) - px(12)
+        for toast in cls.active:
+            w, h = px(cls.WIDTH), toast.win.winfo_reqheight()
+            right = area[2] if area else toast.win.winfo_screenwidth()
+            y -= h
+            toast.win.geometry(f"{w}x{h}+{right - w - px(12)}+{y}")
+            y -= px(10)
 
     def close(self):
+        if self in ReminderToast.active:
+            ReminderToast.active.remove(self)
         if self.win.winfo_exists():
-            self.win.grab_release()
             self.win.destroy()
+        ReminderToast.relayout()
 
 
 def ask_text(parent, title, prompt, ok_text="建立"):
@@ -838,7 +1028,7 @@ class App(tk.Tk):
     """主視窗。網路工作一律丟到背景執行緒，結果經 queue 交回主執行緒更新畫面。"""
 
     def __init__(self, google, borderless=True, pin_to_desktop=True, watch_pid=False,
-                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR):
+                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR, desktop_reminder=True):
         super().__init__()
         apply_dpi_scale(self)
         self.g = google
@@ -871,6 +1061,10 @@ class App(tk.Tk):
         self.undo_group = None
         self.undo_job = None
         self.new_due = self.today   # 新增工作的日期，預設跟著月曆選中的日期
+        self.new_time = None        # 新增工作的提醒時間（選填）
+        self.desktop_reminder = desktop_reminder
+        self.reminded = set(self.state_data.get("reminded", []))  # 已提醒過的「任務@時間」
+        self.snoozed = {k: dt.datetime.fromisoformat(v) for k, v in self.state_data.get("snoozed", {}).items()}
         self.detail = None          # 詳細頁編輯中的工作與欄位
 
         self._build()
@@ -882,6 +1076,8 @@ class App(tk.Tk):
         self.after(100, self._poll_queue)
         self.bind("<FocusIn>", self._on_focus)
         self._bind_shortcuts()
+        if desktop_reminder:
+            self.after(5000, self._check_reminders)
         if watch_pid:
             self.after(1000, self._watch_pid)
         if self.g.refresh_token:
@@ -913,6 +1109,7 @@ class App(tk.Tk):
             # 一般視窗是備援模式，維持系統預設。
             # 實測：有邊框視窗掛到桌面後，加上工作列樣式就無法撐過 Win + D，兩者只能擇一。
             return
+        self.update_idletasks()  # 確保 Windows 視窗已建立，否則設定會套到錯誤的 HWND
         if self.pin_to_desktop:
             win_pin_to_desktop(self)
             # 「可縮小」讓工作列點擊能縮到背景，但 Win + D 也會因此縮掉視窗；
@@ -922,6 +1119,8 @@ class App(tk.Tk):
         self._reshow_with_appwindow(retries=1)
 
     def _undo_show_desktop(self):
+        if time.time() < getattr(self, "_self_minimize_until", 0):
+            return  # 使用者自己按「—」縮小，不是 Win + D
         if win_is_minimized(self) and not win_other_app_windows_visible(self):
             win_show_no_activate(self)  # 所有視窗都被縮掉＝Win + D，DayNote 留在桌面上
 
@@ -933,6 +1132,9 @@ class App(tk.Tk):
         self.after(200, lambda: self._verify_taskbar(retries))
 
     def _verify_taskbar(self, retries):
+        # 視窗重新顯示後再確認「釘在桌面」；沒套上（例如啟動太早）就重設
+        if self.pin_to_desktop and not win_is_pinned(self):
+            win_pin_to_desktop(self)
         self.in_taskbar = win_has_appwindow(self)
         if self.in_taskbar:
             return
@@ -969,6 +1171,8 @@ class App(tk.Tk):
 
     def minimize(self):
         if self.borderless:
+            # 自己按「—」縮小時，暫停 Win + D 自動還原，避免被誤判叫回來
+            self._self_minimize_until = time.time() + 1.5
             win_minimize(self)
         else:
             self.iconify()
@@ -1086,6 +1290,14 @@ class App(tk.Tk):
         Tooltip(self.cmb_list, "新增的工作要放進哪個清單")
         self.btn_new_due = tk.Label(bottom, bg=CARD_BG, fg=ACCENT, font=SMALL, cursor="hand2", padx=px(4))
         self.btn_new_due.pack(side="right", padx=(0, px(4)))
+        self.btn_new_time = tk.Label(bottom, bg=CARD_BG, fg=ACCENT, font=SMALL, cursor="hand2", padx=px(2))
+        self.btn_new_time.pack(side="right")
+        self.btn_new_time.bind("<Button-1>", lambda e: TimePicker(
+            self, self.btn_new_time, self.new_time, self._set_new_time))
+        Tooltip(self.btn_new_time, "提醒時間（選填）：時間到會在右下角跳出提醒")
+        # 右側按鈕都放好後再放輸入框：空間不足時縮的是輸入框，而不是按鈕
+        self.entry.pack_forget()
+        self.entry.pack(side="left", fill="x", expand=True, padx=px(4))
         self.btn_new_due.bind("<Button-1>", lambda e: DatePicker(
             self, self.btn_new_due, self.new_due, self._set_new_due))
         Tooltip(self.btn_new_due, "新增的工作要排在哪一天（可選「無日期」）")
@@ -1114,6 +1326,7 @@ class App(tk.Tk):
         self.lbl_date.config(text=f"{d.month}月{d.day}日 星期{WEEKDAY_NAME[d.weekday()]}")
         self.btn_compact.config(text="展開" if self.compact else "收合")
         self.btn_new_due.config(text=f"📅 {date_text(self.new_due, short=True)} ▾")
+        self.btn_new_time.config(text=f"⏰ {time_text(self.new_time)}" if self.new_time else "⏰")
         if self.placeholder_on:  # 提示文字跟著選中的日期變動
             self.entry.delete(0, "end")
             self.entry.insert(0, self._placeholder_text())
@@ -1186,7 +1399,9 @@ class App(tk.Tk):
         day = self.selected
         events = self.events.get(day, [])
         top_level = self._top_level()
-        tasks = sorted((t for t in top_level if t["due"] == day), key=self._order_key)
+        # 有時間的排前面並依時間排序，其餘依 Google Tasks 的順序
+        tasks = sorted((t for t in top_level if t["due"] == day),
+                       key=lambda t: (t.get("time") is None, t.get("time") or dt.time(), self._order_key(t)))
         if day == self.today:
             # 比照 To Do「我的一天」：今天的清單最上方集中顯示所有逾期待辦
             overdue = sorted((t for t in top_level if t["due"] and t["due"] < day),
@@ -1256,13 +1471,16 @@ class App(tk.Tk):
 
     def _task_with_children(self, task):
         overdue = task["due"] is not None and task["due"] < self.today
-        due = task["due"]
-        subtitle = (f"已逾期 · {due.month}月{due.day}日 · {task['list_title']}" if overdue
-                    else task["list_title"])
+        due, at = task["due"], time_text(task.get("time"))
+        if overdue:
+            subtitle = f"已逾期 · {due.month}月{due.day}日{' ' + at if at else ''} · {task['list_title']}"
+        else:
+            subtitle = f"⏰ {at} · {task['list_title']}" if at else task["list_title"]
         self._card(task["title"], subtitle, task, subtitle_fg=RED if overdue else GRAY)
         for child in self._children(task):
-            # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示
-            self._card(child["title"], "", child, indent=True)
+            # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示；有時間才顯示
+            child_at = time_text(child.get("time"))
+            self._card(child["title"], f"⏰ {child_at}" if child_at else "", child, indent=True)
 
     def _card(self, title, subtitle, task, indent=False, subtitle_fg=GRAY, event_time=None):
         """清單中的一列（扁平樣式，比照 Google Tasks：無外框，列與列之間以細線分隔）。
@@ -1348,6 +1566,12 @@ class App(tk.Tk):
         self.new_due = day
         self.redraw()
 
+    def _set_new_time(self, value):
+        self.new_time = value
+        if value and self.new_due is None:  # 提醒需要日期；沒有日期時預設今天
+            self.new_due = dt.date.today()
+        self.redraw()
+
     # ---- 詳細頁（比照 Google Tasks App：標題、詳細資訊、日期、子工作、刪除、標示為完成）
 
     def _find_task(self, task_id):
@@ -1357,7 +1581,7 @@ class App(tk.Tk):
         if self.detail:
             self.close_detail()  # 從子工作切換時，先儲存目前這筆
         task = self._find_task(task["id"]) or task
-        self.detail = {"task": task, "due": task["due"]}
+        self.detail = {"task": task, "due": task["due"], "time": task.get("time")}
         self._hide_undo()
         self.main_view.pack_forget()
         self._render_detail()
@@ -1401,6 +1625,11 @@ class App(tk.Tk):
                            cursor="hand2", padx=px(8), pady=px(2), highlightthickness=1, highlightbackground=BORDER)
         btn_due.pack(side="left", padx=px(8))
         btn_due.bind("<Button-1>", lambda e: DatePicker(self, btn_due, self.detail["due"], self._set_detail_due))
+        at = time_text(self.detail["time"])
+        btn_time = tk.Label(row, text=f"⏰ {at} ▾" if at else "⏰ 加提醒時間 ▾", bg=CARD_BG, fg=ACCENT, font=FONT,
+                            cursor="hand2", padx=px(8), pady=px(2), highlightthickness=1, highlightbackground=BORDER)
+        btn_time.pack(side="left")
+        btn_time.bind("<Button-1>", lambda e: TimePicker(self, btn_time, self.detail["time"], self._set_detail_time))
         if task.get("parent"):
             tk.Label(view, text="（這是子工作，在主畫面會顯示在父工作下方）", bg=BG, fg=GRAY, font=SMALL,
                      anchor="w").pack(fill="x", pady=(px(4), 0), **pad)
@@ -1449,6 +1678,14 @@ class App(tk.Tk):
 
     def _set_detail_due(self, day):
         self.detail["due"] = day
+        if day is None:
+            self.detail["time"] = None  # 沒有日期就不能提醒
+        self._rerender_detail()
+
+    def _set_detail_time(self, value):
+        self.detail["time"] = value
+        if value and self.detail["due"] is None:  # 提醒需要日期；沒有日期時預設今天
+            self.detail["due"] = dt.date.today()
         self._rerender_detail()
 
     def _detail_changes(self):
@@ -1459,8 +1696,8 @@ class App(tk.Tk):
         if title and title != task["title"]:
             fields["title"] = title
         notes = self.detail_notes.get("1.0", "end-1c")
-        if notes != task.get("notes", ""):
-            fields["notes"] = notes
+        if notes != task.get("notes", "") or self.detail["time"] != task.get("time"):
+            fields["notes"] = join_time_notes(self.detail["time"], notes)  # 時間寫回詳細資訊第一行
         if self.detail["due"] != task["due"]:
             due = self.detail["due"]
             fields["due"] = f"{due.isoformat()}T00:00:00.000Z" if due else None
@@ -1477,7 +1714,9 @@ class App(tk.Tk):
         self.main_view.pack(fill="both", expand=True)
         if fields:
             before = dict(task)
-            task.update({k: v for k, v in fields.items() if k != "due"})
+            task.update({k: v for k, v in fields.items() if k not in ("due", "notes")})
+            if "notes" in fields:
+                task["time"], task["notes"] = split_time_notes(fields["notes"])
             if "due" in fields:
                 task["due"] = task_due({"due": fields["due"]})
             self._set_status("儲存中…")
@@ -1536,7 +1775,8 @@ class App(tk.Tk):
                 return
             self.tasks.append({"id": created["id"], "title": created.get("title") or title,
                                "list_id": lst["id"], "list_title": lst["title"], "due": task_due(created),
-                               "parent": parent["id"], "notes": "", "position": created.get("position", "")})
+                               "parent": parent["id"], "notes": "", "time": None,
+                               "position": created.get("position", "")})
             self._set_status(f"已新增子工作「{title}」")
             if self.detail and self.detail["task"]["id"] == parent["id"]:
                 self._rerender_detail()
@@ -1653,6 +1893,46 @@ class App(tk.Tk):
         if 0 <= index < len(self.lists):
             self.state_data["last_list_id"] = self.lists[index]["id"]
 
+    # ---- 電腦端提醒（方案 B：時間存在詳細資訊第一行）
+
+    def _check_reminders(self):
+        """時間到的工作在右下角跳出提醒；同一筆只提醒一次（含 DayNote 重開後）。"""
+        now = dt.datetime.now()
+        changed = False
+        for task in list(self.tasks):
+            if not (task.get("time") and task["due"]):
+                continue
+            when = dt.datetime.combine(task["due"], task["time"])
+            key = f"{task['id']}@{when:%Y-%m-%dT%H:%M}"
+            if key in self.reminded:
+                continue
+            fire_at = self.snoozed.get(key, when)
+            if now < fire_at:
+                continue
+            self.reminded.add(key)
+            self.snoozed.pop(key, None)
+            changed = True
+            if now - when > dt.timedelta(hours=REMINDER_MAX_LATE_H) and fire_at == when:
+                continue  # 錯過太久（例如關機好幾天）就不補跳
+            ReminderToast(self, task, when,
+                          on_done=lambda t=task: self.complete(t),
+                          on_snooze=lambda k=key: self._snooze(k))
+        if changed:
+            self._save_reminder_state()
+        self.after(REMINDER_CHECK_MS, self._check_reminders)
+
+    def _snooze(self, key):
+        self.reminded.discard(key)
+        self.snoozed[key] = dt.datetime.now() + dt.timedelta(minutes=REMINDER_SNOOZE_MIN)
+        self._save_reminder_state()
+        self._set_status(f"{REMINDER_SNOOZE_MIN} 分鐘後再提醒")
+
+    def _save_reminder_state(self):
+        """已提醒記錄寫進 daynote_state.json，重開不會重複提醒；只保留最近 300 筆。"""
+        self.state_data["reminded"] = sorted(self.reminded, key=lambda k: k.split("@")[-1])[-300:]
+        self.state_data["snoozed"] = {k: v.isoformat() for k, v in self.snoozed.items()}
+        save_state(self.state_data)
+
     def _watch_pid(self):
         """單一執行個體：PID 檔被移除或換成別的 PID（start.sh 或新開的 DayNote），就正常關閉並存好狀態。"""
         try:
@@ -1729,7 +2009,8 @@ class App(tk.Tk):
                     continue
                 tasks.append({"id": t["id"], "title": t.get("title") or "（無標題）",
                               "list_id": lst["id"], "list_title": lst.get("title", ""),
-                              "due": task_due(t), "parent": t.get("parent"), "notes": t.get("notes", ""),
+                              "due": task_due(t), "parent": t.get("parent"),
+                              **dict(zip(("time", "notes"), split_time_notes(t.get("notes", "")))),
                               "position": t.get("position", "")})
         year, month = view
         first = dt.date(year, month, 1)
@@ -1852,7 +2133,9 @@ class App(tk.Tk):
             return
         lst = self.lists[index]
         self._remember_list()
-        due = self.new_due
+        due, time_value = self.new_due, self.new_time
+        if time_value and due is None:
+            due = dt.date.today()
         self.entry.delete(0, "end")
         self._set_status("新增中…")
 
@@ -1864,11 +2147,14 @@ class App(tk.Tk):
                 return
             self.tasks.append({"id": created["id"], "title": created.get("title") or title,
                                "list_id": lst["id"], "list_title": lst.get("title", ""),
-                               "due": task_due(created), "parent": None, "notes": "",
+                               "due": task_due(created), "parent": None, "notes": "", "time": time_value,
                                "position": created.get("position", "")})
-            self._set_status(f"已新增到「{lst.get('title', '')}」")
+            self.new_time = None  # 時間只套用在這一筆
+            when = f"，{time_text(time_value)} 提醒" if time_value else ""
+            self._set_status(f"已新增到「{lst.get('title', '')}」{when}")
             self.redraw()
-        self.run_bg(lambda: self.g.add_task(lst["id"], title, due), done)
+        notes = join_time_notes(time_value, "")
+        self.run_bg(lambda: self.g.add_task(lst["id"], title, due, notes=notes or None), done)
 
     # ---- 執行緒
 
@@ -1906,6 +2192,7 @@ def main():
     try:
         App(google, borderless=bool(cfg.get("borderless", True)),
             pin_to_desktop=bool(cfg.get("pin_to_desktop", True)), watch_pid=watch,
+            desktop_reminder=bool(cfg.get("desktop_reminder", True)),
             holiday_calendar=cfg.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)).mainloop()
     finally:
         remove_pid()
