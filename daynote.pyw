@@ -50,6 +50,8 @@ FOCUS_REFRESH_SEC = 30
 BG = "#fff7d1"       # 便利貼淡黃
 BORDER = "#d9c76a"
 TEXT = "#323130"
+EVENT_DOT = "#a19f9d"  # 月曆上「只有行程」的日期圓點
+CHILD_INDENT = 28     # 子任務卡片縮排
 CARD_BG = "#fffdf3"   # 卡片底色：比純白柔和，在黃底上不突兀
 PLACEHOLDER = "新增工作"
 SELECTED = "#f3e6a2"
@@ -496,6 +498,56 @@ def event_days(event):
 
 # ---------------------------------------------------------------- 畫面
 
+class Tooltip:
+    """滑鼠停留在元件上 0.5 秒後，在下方顯示一行功能說明。
+
+    text 可以是字串，或回傳字串的函式（用於會變動的說明，例如置頂開關）。
+    """
+
+    DELAY_MS = 500
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        self.job = None
+        # add="+"：不覆蓋元件原本的滑鼠事件（例如按鈕的 hover 變色）
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _=None):
+        self._cancel()
+        self.job = self.widget.after(self.DELAY_MS, self._show)
+
+    def _cancel(self):
+        if self.job:
+            self.widget.after_cancel(self.job)
+            self.job = None
+
+    def _show(self):
+        self.job = None
+        text = self.text() if callable(self.text) else self.text
+        tip = tk.Toplevel(self.widget)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)  # 主視窗置頂時，提示也要在最上層
+        tk.Label(tip, text=text, bg=TEXT, fg="white", font=SMALL, padx=6, pady=2).pack()
+        tip.update_idletasks()
+        x = self.widget.winfo_rootx() + (self.widget.winfo_width() - tip.winfo_reqwidth()) // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        screen = win_virtual_screen()
+        if screen:  # 靠近螢幕右緣（例如 ✕ 按鈕）時往內縮，避免提示被切掉
+            x = min(max(x, screen[0]), screen[2] - tip.winfo_reqwidth())
+        tip.geometry(f"+{x}+{y}")
+        self.tip = tip
+
+    def _hide(self, _=None):
+        self._cancel()
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
 class App(tk.Tk):
     """主視窗。網路工作一律丟到背景執行緒，結果經 queue 交回主執行緒更新畫面。"""
 
@@ -622,13 +674,15 @@ class App(tk.Tk):
             self.after_cancel(self._poll_job)
         self.destroy()
 
-    def _icon_button(self, parent, text, command, font=ICON_FONT):
+    def _icon_button(self, parent, text, command, font=ICON_FONT, tip=None):
         """扁平小按鈕（Label 實作，比 ttk.Button 窄，頂部列才放得下）。"""
         btn = tk.Label(parent, text=text, bg=BG, fg=GRAY, font=font,
                        padx=6, pady=2, cursor="hand2")
         btn.bind("<Button-1>", lambda e: command())
         btn.bind("<Enter>", lambda e: btn.config(bg=HOVER))
         btn.bind("<Leave>", lambda e: btn.config(bg=BG))
+        if tip:
+            Tooltip(btn, tip)
         return btn
 
     # ---- 版面
@@ -642,14 +696,17 @@ class App(tk.Tk):
         self.btn_login = tk.Label(tools, text="登入", bg=ACCENT, fg="white", font=FONT,
                                   padx=8, cursor="hand2")
         self.btn_login.bind("<Button-1>", lambda e: self.login())
-        self.btn_refresh = self._icon_button(tools, "⟳", self.refresh)
+        Tooltip(self.btn_login, "用瀏覽器登入 Google 帳號")
+        self.btn_refresh = self._icon_button(tools, "⟳", self.refresh, tip="立即同步")
         self.btn_refresh.pack(side="left")
-        self.btn_pin = self._icon_button(tools, "📌", self.toggle_topmost)
-        self.btn_pin.bind("<Leave>", lambda e: self._paint_pin())
+        self.btn_pin = self._icon_button(
+            tools, "📌", self.toggle_topmost,
+            tip=lambda: "取消置頂" if self.topmost else "置頂：永遠顯示在其他視窗上面")
+        self.btn_pin.bind("<Leave>", lambda e: self._paint_pin(), add="+")
         self.btn_pin.pack(side="left")
         self._paint_pin()
-        self.btn_min = self._icon_button(tools, "—", self.minimize)
-        btn_close = self._icon_button(tools, "✕", self.close)
+        self.btn_min = self._icon_button(tools, "—", self.minimize, tip="縮小到工作列")
+        btn_close = self._icon_button(tools, "✕", self.close, tip="關閉")
         if self.borderless:
             self.btn_min.pack(side="left")
             btn_close.pack(side="left")
@@ -662,9 +719,10 @@ class App(tk.Tk):
 
         nav = tk.Frame(self, bg=BG)
         nav.pack(fill="x", padx=12, pady=(6, 0))
-        self._icon_button(nav, "◀", lambda: self.shift_month(-1)).pack(side="left")
-        self._icon_button(nav, "今天", lambda: self.select(dt.date.today()), font=FONT).pack(side="right")
-        self._icon_button(nav, "▶", lambda: self.shift_month(1)).pack(side="right")
+        self._icon_button(nav, "◀", lambda: self.shift_month(-1), tip="上個月").pack(side="left")
+        self._icon_button(nav, "今天", lambda: self.select(dt.date.today()), font=FONT,
+                          tip="回到今天").pack(side="right")
+        self._icon_button(nav, "▶", lambda: self.shift_month(1), tip="下個月").pack(side="right")
         self.lbl_month = tk.Label(nav, font=FONT, bg=BG)
         self.lbl_month.pack(side="left", expand=True)
 
@@ -677,6 +735,7 @@ class App(tk.Tk):
         status_row = tk.Frame(self, bg=BG)
         status_row.pack(side="bottom", fill="x", padx=(12, 0))
         grip = tk.Label(status_row, text="◢", bg=BG, fg=BORDER, font=SMALL, cursor="size_nw_se")
+        Tooltip(grip, "拖拉調整視窗大小")
         grip.pack(side="right", anchor="se")
         grip.bind("<Button-1>", self._start_resize)
         grip.bind("<B1-Motion>", self._on_resize)
@@ -700,6 +759,7 @@ class App(tk.Tk):
         self.cmb_list = ttk.Combobox(bottom, state="readonly", width=10,
                                      postcommand=self._raise_list_popdown)
         self.cmb_list.pack(side="right")
+        Tooltip(self.cmb_list, "新增的工作要放進哪個清單")
 
         # 可捲動的任務清單
         wrap = tk.Frame(self, bg=BG)
@@ -731,8 +791,10 @@ class App(tk.Tk):
         for i, name in enumerate(WEEK_HEAD):
             c.create_text(i * CELL_W + CELL_W / 2, HEAD_H / 2, text=name, fill=GRAY, font=SMALL)
 
-        task_days = {t["due"] for t in self.tasks if t["due"]}
+        # 子任務跟著父任務，月曆圓點只看最上層任務的日期
+        task_days = {t["due"] for t in self._top_level() if t["due"]}
         self.weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(year, month)
+        c.config(height=HEAD_H + len(self.weeks) * CELL_H)  # 依當月週數調整高度，不留空白列
         for row, week in enumerate(self.weeks):
             for col, day in enumerate(week):
                 x, y = col * CELL_W, HEAD_H + row * CELL_H
@@ -746,8 +808,11 @@ class App(tk.Tk):
                     color = "#323130" if day.month == month else "#c8c6c4"
                 c.create_text(cx, y + 14, text=str(day.day), fill=color, font=FONT)
                 if day in task_days or day in self.events:
-                    # 未完成且日期已過 → 紅點（清單只含未完成任務）
-                    dot = RED if day in task_days and day < self.today else ACCENT
+                    # 紅＝有逾期未完成待辦；藍＝有待辦；灰＝只有日曆行程
+                    if day in task_days:
+                        dot = RED if day < self.today else ACCENT
+                    else:
+                        dot = EVENT_DOT
                     c.create_oval(cx - 2, y + 28, cx + 2, y + 32, fill=dot, outline="")
 
     def _raise_list_popdown(self):
@@ -760,15 +825,19 @@ class App(tk.Tk):
             widget.destroy()
         day = self.selected
         events = self.events.get(day, [])
-        tasks = [t for t in self.tasks if t["due"] == day]
+        top_level = self._top_level()
+        tasks = sorted((t for t in top_level if t["due"] == day), key=self._order_key)
+        label = "今天" if day == self.today else f"{day.month}月{day.day}日"
+        tk.Label(self.list_frame, text=f"{label} · {len(events) + len(tasks)} 項",
+                 bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(0, 2))
         for when, title in events:
             self._card(f"{when}  {title}", "Google 日曆", None)
         for task in tasks:
-            self._card(task["title"], task["list_title"], task)
+            self._task_with_children(task)
         if not events and not tasks:
             tk.Label(self.list_frame, text="這天沒有任務", bg=BG, fg=GRAY, font=FONT).pack(pady=8)
 
-        undated = [t for t in self.tasks if t["due"] is None]
+        undated = sorted((t for t in top_level if t["due"] is None), key=self._order_key)
         if undated:
             arrow = "▼" if self.show_undated else "▶"
             header = tk.Label(self.list_frame, text=f"{arrow} 未排日期（{len(undated)}）",
@@ -777,23 +846,54 @@ class App(tk.Tk):
             header.bind("<Button-1>", lambda e: self._toggle_undated())
             if self.show_undated:
                 for task in undated:
-                    self._card(task["title"], task["list_title"], task)
+                    self._task_with_children(task)
         self.list_canvas.yview_moveto(0)
 
-    def _card(self, title, subtitle, task):
-        """一張圓角任務卡片；task 為 None 時是日曆事件（只顯示、不可勾選）。"""
+    # ---- 任務階層（比照 Google Tasks：子任務縮排在父任務下方）
+
+    def _top_level(self):
+        """最上層任務：沒有 parent，或 parent 不在未完成清單中（父任務已完成時，子任務照常顯示）。"""
+        ids = {t["id"] for t in self.tasks}
+        return [t for t in self.tasks if not t.get("parent") or t["parent"] not in ids]
+
+    def _children(self, task):
+        return sorted((t for t in self.tasks if t.get("parent") == task["id"]),
+                      key=lambda t: t.get("position", ""))
+
+    def _order_key(self, task):
+        """先依清單順序、再依 Google Tasks 的 position 排序，和手機 App 一致。"""
+        list_ids = [lst["id"] for lst in self.lists]
+        index = list_ids.index(task["list_id"]) if task["list_id"] in list_ids else len(list_ids)
+        return index, task.get("position", "")
+
+    def _task_with_children(self, task):
+        overdue = task["due"] is not None and task["due"] < self.today
+        subtitle = f"已逾期 · {task['list_title']}" if overdue else task["list_title"]
+        self._card(task["title"], subtitle, task, subtitle_fg=RED if overdue else GRAY)
+        for child in self._children(task):
+            # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示
+            self._card(child["title"], "", child, indent=True)
+
+    def _card(self, title, subtitle, task, indent=False, subtitle_fg=GRAY):
+        """一張圓角任務卡片；task 為 None 時是日曆事件（只顯示、不可勾選）。indent＝子任務縮排。"""
         card = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=48)
-        card.pack(fill="x", pady=3)
+        card.pack(fill="x", pady=3, padx=(CHILD_INDENT if indent else 0, 0))
         inner = tk.Frame(card, bg=CARD_BG)
         if task:
-            self._check_circle(inner, task).pack(side="left", padx=(0, 8))
+            circle = self._check_circle(inner, task)
+            circle.pack(side="left", padx=(0, 8))
+            count = len(self._children(task))
+            Tooltip(circle, f"標記為完成（含 {count} 個子任務）" if count else "標記為完成")
         else:
-            tk.Label(inner, text="◇", bg=CARD_BG, fg=GRAY, font=FONT, width=2).pack(side="left", padx=(0, 6))
+            icon = tk.Label(inner, text="◇", bg=CARD_BG, fg=GRAY, font=FONT, width=2)
+            icon.pack(side="left", padx=(0, 6))
+            Tooltip(icon, "Google 日曆行程（唯讀，請到日曆 App 修改）")
         text = tk.Frame(inner, bg=CARD_BG)
         text.pack(side="left", fill="x", expand=True)
         lbl_title = tk.Label(text, text=title, bg=CARD_BG, fg=TEXT, font=FONT, anchor="w", justify="left")
         lbl_title.pack(fill="x")
-        tk.Label(text, text=subtitle, bg=CARD_BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
+        if subtitle:
+            tk.Label(text, text=subtitle, bg=CARD_BG, fg=subtitle_fg, font=SMALL, anchor="w").pack(fill="x")
         window = card.create_window(10, 7, window=inner, anchor="nw")
 
         def relayout(_=None):
@@ -813,7 +913,7 @@ class App(tk.Tk):
     def _check_circle(self, parent, task):
         """To Do 風格的圓圈：滑鼠移上去顯示 ✓，點擊後填滿並標記完成。"""
         c = tk.Canvas(parent, width=22, height=22, bg=CARD_BG, highlightthickness=0, cursor="hand2")
-        c.create_oval(2, 2, 20, 20, outline=GRAY, width=1.5, tags="ring")
+        c.create_oval(2, 2, 20, 20, outline=GRAY, width=2, tags="ring")
         c.bind("<Enter>", lambda e: c.create_text(11, 11, text="✓", fill=ACCENT, font=SMALL, tags="tick"))
         c.bind("<Leave>", lambda e: c.delete("tick"))
 
@@ -923,7 +1023,8 @@ class App(tk.Tk):
                     continue
                 tasks.append({"id": t["id"], "title": t.get("title") or "（無標題）",
                               "list_id": lst["id"], "list_title": lst.get("title", ""),
-                              "due": task_due(t)})
+                              "due": task_due(t), "parent": t.get("parent"),
+                              "position": t.get("position", "")})
         year, month = view
         first = dt.date(year, month, 1)
         next_month = dt.date(year + month // 12, month % 12 + 1, 1)
@@ -950,17 +1051,28 @@ class App(tk.Tk):
             self.refresh()
 
     def complete(self, task):
+        """標記完成；比照 Google Tasks App，完成父任務時子任務一併完成。
+
+        API 是否會自動連帶完成子任務，官方文件未說明，所以這裡逐一送出，不依賴該行為。
+        """
         if task not in self.tasks:
             return
-        self.tasks.remove(task)  # 先從畫面移除，失敗再放回
+        group = [task] + self._children(task)
+        for t in group:  # 先從畫面移除，失敗再放回
+            self.tasks.remove(t)
         self.redraw()
+
+        def work():
+            for t in group:
+                self.g.complete_task(t["list_id"], t["id"])
 
         def done(_, err):
             if err:
-                self.tasks.append(task)
+                # 可能已部分完成；先放回畫面並顯示錯誤，下次同步會以 Google 上的實際狀態為準
+                self.tasks.extend(group)
                 self.redraw()
                 self._show_error(err)
-        self.run_bg(lambda: self.g.complete_task(task["list_id"], task["id"]), done)
+        self.run_bg(work, done)
 
     def add_task(self):
         title = "" if self.placeholder_on else self.entry.get().strip()
@@ -983,7 +1095,8 @@ class App(tk.Tk):
                 return
             self.tasks.append({"id": created["id"], "title": created.get("title") or title,
                                "list_id": lst["id"], "list_title": lst.get("title", ""),
-                               "due": task_due(created)})
+                               "due": task_due(created), "parent": None,
+                               "position": created.get("position", "")})
             self._set_status(f"已新增到「{lst.get('title', '')}」")
             self.redraw()
         self.run_bg(lambda: self.g.add_task(lst["id"], title, due), done)
