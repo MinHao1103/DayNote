@@ -5,3 +5,6 @@ token.bin
 # 程式自動產生的本機狀態
 daynote_state.json
 __pycache__/
+
+# start.sh 用來辨識執行中的 DayNote
+daynote.pid
