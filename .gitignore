@@ -1,0 +1,10 @@
+# 機密：OAuth 用戶端密鑰、加密後的登入憑證
+config.json
+token.bin
+
+# 程式自動產生的本機狀態
+daynote_state.json
+__pycache__/
+
+# 含個人 Gmail 與專案編號截圖的教學文件，僅本機保存
+docs/DayNote-setup-guide.html

@@ -1,0 +1,7 @@
+{
+  "client_id": "<CLIENT_ID>.apps.googleusercontent.com",
+  "client_secret": "<CLIENT_SECRET>",
+  "ca_file": "",
+  "borderless": true,
+  "pin_to_desktop": true
+}
