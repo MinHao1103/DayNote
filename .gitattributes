@@ -1,5 +1,2 @@
-# shell 腳本固定 LF，避免 Windows 取出後變 CRLF 導致 Git Bash 無法執行
-*.sh text eol=lf
-
-# Windows 批次檔固定 CRLF
+# Windows 批次檔固定 CRLF，避免從 Git 取出後換行格式錯誤
 *.bat text eol=crlf
