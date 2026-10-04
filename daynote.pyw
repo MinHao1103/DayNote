@@ -44,24 +44,29 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 TASKS_API = "https://tasks.googleapis.com/tasks/v1"
 CAL_API = "https://www.googleapis.com/calendar/v3"
+# Google 提供的台灣節慶假日公開日曆；可在 config.json 的 holiday_calendar 改成其他地區或設空字串關閉
+DEFAULT_HOLIDAY_CALENDAR = "zh-tw.taiwan#holiday@group.v.calendar.google.com"
 LOGIN_TIMEOUT_SEC = 300
 FOCUS_REFRESH_SEC = 30
 
 # 畫面樣式
-BG = "#fff7d1"       # 便利貼淡黃
-BORDER = "#d9c76a"
+BG = "#ffffff"       # 白底
+BORDER = "#d6d6d6"
 TEXT = "#323130"
 EVENT_DOT = "#a19f9d"  # 月曆上「只有行程」的日期圓點
-CARD_BG = "#fffdf3"   # 卡片底色：比純白柔和，在黃底上不突兀
+CARD_BG = "#f7f7f7"   # 輸入框、詳細頁欄位底色：比白底略深，看得出可輸入
 EVENT_TIME_FONT = ("Microsoft JhengHei UI", 9, "bold")
 UNDO_SECONDS = 5
-SELECTED = "#f3e6a2"
-DIVIDER = "#eadc96"   # 清單列之間的細分隔線
-HOVER = "#f5eab0"
+SELECTED = "#e8f0fc"  # 月曆選中日期：淡藍，和強調色一致
+DIVIDER = "#ececec"   # 清單列之間的細分隔線
+HOVER = "#f3f3f3"
 CARD = "#ffffff"
 ACCENT = "#2564cf"
 RED = "#d13438"
-GRAY = "#605e5c"     # 在淡黃底上對比約 6:1，符合無障礙 4.5:1
+HOLIDAY_RED = "#c4314b"   # 週末與國定假日的日期數字
+HOLIDAY_RED_FADED = "#e8a9b4"  # 其他月份的週末／假日
+FESTIVAL = "#e3a21a"      # 一般節日（不放假）的角標
+GRAY = "#605e5c"     # 在白底上對比約 6.5:1，符合無障礙 4.5:1
 FONT = ("Microsoft JhengHei UI", 10)
 SMALL = ("Microsoft JhengHei UI", 8)
 TITLE_FONT = ("Microsoft JhengHei UI", 15, "bold")
@@ -209,7 +214,8 @@ def _user32():
     return user32
 
 
-GWL_EXSTYLE, GWLP_HWNDPARENT = -20, -8
+GWL_STYLE, GWL_EXSTYLE, GWLP_HWNDPARENT = -16, -20, -8
+WS_MINIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00080000
 WS_EX_APPWINDOW, WS_EX_TOOLWINDOW = 0x00040000, 0x00000080
 
 
@@ -237,8 +243,70 @@ def win_add_appwindow(widget):
         hwnd = _hwnd(widget)
         style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW)
+        # 無邊框視窗沒有「可縮小」屬性，點工作列圖示不會縮到背景；補上後行為和一般程式一樣
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_MINIMIZEBOX | WS_SYSMENU)
     except (OSError, AttributeError):
         pass
+
+
+def win_other_app_windows_visible(widget):
+    """除了 DayNote 之外，是否還有正常顯示（未縮小）的程式視窗。
+
+    用來區分縮小的原因：Win + D 會把所有程式視窗縮掉（實測剩 0 個）；點工作列只會縮 DayNote。
+    """
+    own = _hwnd(widget)
+    found = []
+    try:
+        user32 = _user32()
+        user32.GetWindow.argtypes = [wintypes.HWND, ctypes.c_uint]
+        user32.GetWindow.restype = wintypes.HWND
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        dwmapi = ctypes.WinDLL("dwmapi")
+        skip_classes = ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def check(hwnd, _):
+            if hwnd == own or not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                return True
+            cloaked = ctypes.c_int(0)  # 隱藏中的 UWP 視窗（DWMWA_CLOAKED）
+            dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+            ex, st = user32.GetWindowLongW(hwnd, GWL_EXSTYLE), user32.GetWindowLongW(hwnd, GWL_STYLE)
+            is_app = (ex & WS_EX_APPWINDOW) or (not user32.GetWindow(hwnd, 4) and st & 0x00C00000)
+            if cloaked.value or ex & WS_EX_TOOLWINDOW or not is_app:
+                return True
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, buf, 64)
+            if buf.value not in skip_classes:
+                found.append(hwnd)
+                return False  # 找到一個就夠了
+            return True
+        user32.EnumWindows(check, 0)
+    except (OSError, AttributeError):
+        return True  # 判斷不了時當作工作列點擊，不自動還原
+    return bool(found)
+
+
+def win_is_minimized(widget):
+    try:
+        return bool(ctypes.WinDLL("user32").IsIconic(_hwnd(widget)))
+    except (OSError, AttributeError):
+        return False
+
+
+def _show_window_async(widget, cmd):
+    """以 ShowWindowAsync 改變視窗狀態。
+
+    不可用同步的 ShowWindow：它會在 ctypes 呼叫中途觸發 tkinter 的視窗事件（例如 <Unmap>），
+    此時 GIL 已釋放，Python 會直接當掉（實測 Fatal Python error）。
+    """
+    user32 = ctypes.WinDLL("user32")
+    user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindowAsync(_hwnd(widget), cmd)
+
+
+def win_show_no_activate(widget):
+    _show_window_async(widget, 4)  # SW_SHOWNOACTIVATE：顯示但不搶焦點
 
 
 def win_has_appwindow(widget):
@@ -260,10 +328,8 @@ def win_round_corners(widget):
 
 
 def win_minimize(widget):
-    """無邊框視窗不能用 tkinter 的 iconify()，改用 ShowWindow(SW_MINIMIZE)。"""
-    user32 = ctypes.WinDLL("user32")
-    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    user32.ShowWindow(_hwnd(widget), 6)
+    """無邊框視窗不能用 tkinter 的 iconify()，改用 ShowWindowAsync(SW_MINIMIZE)。"""
+    _show_window_async(widget, 6)
 
 
 def win_virtual_screen():
@@ -500,13 +566,25 @@ class Google:
         self.api("PATCH", f"{TASKS_API}/lists/{_q(list_id)}/tasks/{_q(task_id)}",
                  body={"status": "needsAction", "completed": None})
 
-    def events(self, start, end):
-        """讀取主日曆在 [start, end) 期間的事件；singleEvents=true 會把重複事件展開成單筆。"""
+    def events(self, start, end, calendar_id="primary"):
+        """讀取日曆在 [start, end) 期間的事件；singleEvents=true 會把重複事件展開成單筆。"""
         def local_iso(d):
             return dt.datetime.combine(d, dt.time()).astimezone().isoformat()
-        return self._paged(f"{CAL_API}/calendars/primary/events", {
+        return self._paged(f"{CAL_API}/calendars/{_q(calendar_id)}/events", {
             "timeMin": local_iso(start), "timeMax": local_iso(end),
             "singleEvents": "true", "orderBy": "startTime", "maxResults": 250})
+
+
+def _notes_preview(notes, limit=24):
+    """詳細資訊的單行預覽：取第一個非空白行，過長時截斷。"""
+    line = next((ln.strip() for ln in notes.splitlines() if ln.strip()), "")
+    return line if len(line) <= limit else line[:limit] + "…"
+
+
+def _descendants(widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _descendants(child)
 
 
 def _set_bg(widget, color):
@@ -695,8 +773,8 @@ class DatePicker:
             self.win.destroy()
 
 
-def date_text(day):
-    """日期的簡短顯示：今天／明天／無日期／10/8（週四）。"""
+def date_text(day, short=False):
+    """日期的簡短顯示：今天／明天／無日期／10/8（四）；short=True 時省略星期（空間有限的輸入列用）。"""
     if day is None:
         return "無日期"
     today = dt.date.today()
@@ -704,13 +782,14 @@ def date_text(day):
         return "今天"
     if day == today + dt.timedelta(days=1):
         return "明天"
-    return f"{day.month}/{day.day}（{WEEKDAY_NAME[day.weekday()]}）"
+    return f"{day.month}/{day.day}" if short else f"{day.month}/{day.day}（{WEEKDAY_NAME[day.weekday()]}）"
 
 
 class App(tk.Tk):
     """主視窗。網路工作一律丟到背景執行緒，結果經 queue 交回主執行緒更新畫面。"""
 
-    def __init__(self, google, borderless=True, pin_to_desktop=True, watch_pid=False):
+    def __init__(self, google, borderless=True, pin_to_desktop=True, watch_pid=False,
+                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR):
         super().__init__()
         apply_dpi_scale(self)
         self.g = google
@@ -732,6 +811,8 @@ class App(tk.Tk):
         self.selected = self.today
         self.view = (self.today.year, self.today.month)
         self.lists, self.tasks, self.events = [], [], {}
+        self.holidays = {}  # {日期: [(名稱, 是否放假)]}
+        self.holiday_calendar = holiday_calendar
         self.weeks = []
         self.busy = False
         self.last_refresh = 0.0
@@ -785,8 +866,15 @@ class App(tk.Tk):
             return
         if self.pin_to_desktop:
             win_pin_to_desktop(self)
+            # 「可縮小」讓工作列點擊能縮到背景，但 Win + D 也會因此縮掉視窗；
+            # 被縮小時若其他程式視窗也全被縮掉（Win + D），就立刻還原，維持釘在桌面
+            self.bind("<Unmap>", lambda e: e.widget is self and self.after(150, self._undo_show_desktop))
         win_round_corners(self)
         self._reshow_with_appwindow(retries=1)
+
+    def _undo_show_desktop(self):
+        if win_is_minimized(self) and not win_other_app_windows_visible(self):
+            win_show_no_activate(self)  # 所有視窗都被縮掉＝Win + D，DayNote 留在桌面上
 
     def _reshow_with_appwindow(self, retries):
         """套用工作列樣式並重新顯示；等視窗真的顯示後再確認，沒套上就重試。"""
@@ -864,7 +952,7 @@ class App(tk.Tk):
         top.pack(fill="x", padx=(px(12), px(4)), pady=(px(6), 0))
         # 右側按鈕群先 pack，空間不足時被壓縮的是日期標題，而不是按鈕
         tools = tk.Frame(top, bg=BG)
-        tools.pack(side="right")
+        tools.pack(side="right", anchor="n")  # 按鈕固定在右上角
         self.btn_login = tk.Label(tools, text="登入", bg=ACCENT, fg="white", font=FONT,
                                   padx=px(8), cursor="hand2")
         self.btn_login.bind("<Button-1>", lambda e: self.login())
@@ -883,7 +971,8 @@ class App(tk.Tk):
             self.btn_min.pack(side="left")
             btn_close.pack(side="left")
         self.lbl_date = tk.Label(top, font=TITLE_FONT, bg=BG, anchor="w")
-        self.lbl_date.pack(side="left", fill="x", expand=True)
+        # 標題往下留白，帶動下方月曆與清單整體下移；右上角按鈕位置不變
+        self.lbl_date.pack(side="left", fill="x", expand=True, pady=(px(26), 0))
         # 頂部列（含日期文字）當拖曳區
         for widget in (top, self.lbl_date):
             widget.bind("<Button-1>", self._start_drag)
@@ -893,11 +982,11 @@ class App(tk.Tk):
         self.main_view = tk.Frame(self, bg=BG)
         self.detail_view = tk.Frame(self, bg=BG)
         nav = tk.Frame(self.main_view, bg=BG)
-        nav.pack(fill="x", padx=px(12), pady=(px(6), 0))
+        nav.pack(fill="x", padx=px(12), pady=(px(18), 0))  # 和標題拉開距離
         self._icon_button(nav, "◀", lambda: self.shift_month(-1),
                           tip=lambda: "上一週" if self.compact else "上個月").pack(side="left")
         self.btn_compact = self._icon_button(
-            nav, "", self.toggle_compact, font=SMALL,
+            nav, "", self.toggle_compact, font=FONT,  # 與「今天」同字級
             tip=lambda: "展開整個月" if self.compact else "收合月曆：只顯示這一週")
         self.btn_compact.pack(side="right")
         self._icon_button(nav, "今天", lambda: self.select(dt.date.today()), font=FONT,
@@ -975,7 +1064,7 @@ class App(tk.Tk):
         d = self.selected
         self.lbl_date.config(text=f"{d.month}月{d.day}日 星期{WEEKDAY_NAME[d.weekday()]}")
         self.btn_compact.config(text="展開" if self.compact else "收合")
-        self.btn_new_due.config(text=f"📅 {date_text(self.new_due)} ▾")
+        self.btn_new_due.config(text=f"📅 {date_text(self.new_due, short=True)} ▾")
         if self.placeholder_on:  # 提示文字跟著選中的日期變動
             self.entry.delete(0, "end")
             self.entry.insert(0, self._placeholder_text())
@@ -988,7 +1077,9 @@ class App(tk.Tk):
         year, month = self.view
         self.lbl_month.config(text=f"{year} 年 {month} 月")
         for i, name in enumerate(WEEK_HEAD):
-            c.create_text(i * CELL_W + CELL_W / 2, HEAD_H / 2, text=name, fill=GRAY, font=SMALL)
+            weekend = name in "日六"
+            c.create_text(i * CELL_W + CELL_W / 2, HEAD_H / 2, text=name,
+                          fill=HOLIDAY_RED if weekend else GRAY, font=SMALL)
 
         # 子任務跟著父任務，月曆圓點只看最上層任務的日期
         task_days = {t["due"] for t in self._top_level() if t["due"]}
@@ -1007,8 +1098,19 @@ class App(tk.Tk):
                     c.create_oval(cx - px(11), y + px(3), cx + px(11), y + px(25), fill=ACCENT, outline="")
                     color = "white"
                 else:
-                    color = "#323130" if day.month == month else "#c8c6c4"
+                    off = day.weekday() >= 5 or self._is_day_off(day)
+                    if day.month == month:
+                        color = HOLIDAY_RED if off else TEXT
+                    else:
+                        color = HOLIDAY_RED_FADED if off else "#c8c6c4"
                 c.create_text(cx, y + px(14), text=str(day.day), fill=color, font=FONT)
+                names = self.holidays.get(day)
+                if names:  # 右上角三角形：紅＝放假的節日，橘＝一般節日
+                    mark = HOLIDAY_RED if self._is_day_off(day) else FESTIVAL
+                    if day.month != month:
+                        mark = HOLIDAY_RED_FADED
+                    rx, ty = x + CELL_W - px(4), y + px(2)
+                    c.create_polygon(rx - px(8), ty, rx, ty, rx, ty + px(8), fill=mark, outline="")
                 if day in task_days or day in self.events:
                     # 紅＝有逾期未完成待辦；藍＝有待辦；灰＝只有日曆行程
                     if day in task_days:
@@ -1016,6 +1118,9 @@ class App(tk.Tk):
                     else:
                         dot = EVENT_DOT
                     c.create_oval(cx - px(2), y + px(28), cx + px(2), y + px(32), fill=dot, outline="")
+
+    def _is_day_off(self, day):
+        return any(off for _, off in self.holidays.get(day, []))
 
     def _raise_list_popdown(self):
         """視窗置頂時，下拉選單也要置頂，否則會被主視窗蓋住。"""
@@ -1043,6 +1148,9 @@ class App(tk.Tk):
         label = "今天" if day == self.today else f"{day.month}月{day.day}日"
         tk.Label(self.list_frame, text=f"{label} · {len(events) + len(tasks)} 項",
                  bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(8, 2))
+        for name, day_off in self.holidays.get(day, []):
+            tk.Label(self.list_frame, text=f"◆ {name}" + ("（放假）" if day_off else ""),
+                     bg=BG, fg=HOLIDAY_RED if day_off else GRAY, font=FONT, anchor="w").pack(fill="x", pady=(0, 2))
         for when, title in events:
             self._card(title, "Google 日曆", None, event_time=when)
         for task in tasks:
@@ -1114,6 +1222,9 @@ class App(tk.Tk):
         text.pack(side="left", fill="x", expand=True)
         lbl_title = tk.Label(text, text=title, bg=BG, fg=TEXT, font=FONT, anchor="w", justify="left")
         lbl_title.pack(fill="x")
+        preview = _notes_preview(task.get("notes", "")) if task else ""
+        if preview:  # 比照 Google Tasks：標題下方顯示詳細資訊第一行
+            tk.Label(text, text=preview, bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
         if subtitle:
             tk.Label(text, text=subtitle, bg=BG, fg=subtitle_fg, font=SMALL, anchor="w").pack(fill="x")
         window = row.create_window(px(4), px(6), window=inner, anchor="nw")
@@ -1123,7 +1234,9 @@ class App(tk.Tk):
                 widget.config(cursor="hand2")
         # 滑鼠移過整列時淡淡變色，提示可以點
         row.bind("<Enter>", lambda e: _set_bg(row, HOVER))
-        row.bind("<Leave>", lambda e: self._leave_row(row, e))
+        # 滑鼠可能從列內的文字直接移出去，此時只有子元件收到 Leave，所以每個子元件都要檢查
+        for widget in (row, *_descendants(row)):
+            widget.bind("<Leave>", lambda e: self._leave_row(row, e), add="+")
 
         def relayout(_=None):
             width = row.winfo_width()
@@ -1517,17 +1630,36 @@ class App(tk.Tk):
         next_month = dt.date(year + month // 12, month % 12 + 1, 1)
         events = {}
         # 月曆會顯示前後月的幾天，查詢範圍前後放寬
-        for ev in self.g.events(first - dt.timedelta(days=7), next_month + dt.timedelta(days=14)):
+        start, end = first - dt.timedelta(days=7), next_month + dt.timedelta(days=14)
+        for ev in self.g.events(start, end):
             for day, when in event_days(ev):
                 events.setdefault(day, []).append((when, ev.get("summary") or "（無標題）"))
-        return view, lists, tasks, events
+        return view, lists, tasks, events, self._load_holidays(start, end)
+
+    def _load_holidays(self, start, end):
+        """（背景執行緒）讀取節慶假日。失敗只是不顯示節日，不影響任務同步。
+
+        Google 假日日曆的 description 以「國定假日」開頭代表放假，「假日節慶」為一般節日（實測）。
+        """
+        holidays = {}
+        if not self.holiday_calendar:
+            return holidays
+        try:
+            items = self.g.events(start, end, self.holiday_calendar)
+        except ApiError:
+            return holidays
+        for ev in items:
+            day_off = (ev.get("description") or "").startswith("國定假日")
+            for day, _ in event_days(ev):
+                holidays.setdefault(day, []).append((ev.get("summary") or "", day_off))
+        return holidays
 
     def _after_load(self, result, err):
         self.busy = False
         if err:
             self._show_error(err)
             return
-        view, self.lists, self.tasks, self.events = result
+        view, self.lists, self.tasks, self.events, self.holidays = result
         self.btn_login.pack_forget()
         self.cmb_list["values"] = [lst.get("title", "") for lst in self.lists]
         list_ids = [lst["id"] for lst in self.lists]
@@ -1666,7 +1798,8 @@ def main():
     watch = write_pid()
     try:
         App(google, borderless=bool(cfg.get("borderless", True)),
-            pin_to_desktop=bool(cfg.get("pin_to_desktop", True)), watch_pid=watch).mainloop()
+            pin_to_desktop=bool(cfg.get("pin_to_desktop", True)), watch_pid=watch,
+            holiday_calendar=cfg.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)).mainloop()
     finally:
         remove_pid()
 

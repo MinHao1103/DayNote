@@ -7,6 +7,7 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 ## 功能
 
 - 月曆圓點：🔵 待辦　🔴 逾期　⚪ 只有行程
+- 週末與國定假日紅字；右上角三角：🔺紅＝放假節日、🔸橘＝一般節日（點日期看名稱）
 - 點任務開啟詳細頁：改標題、詳細資訊、日期，新增子工作，刪除
 - 點圓圈完成（含子工作），5 秒內可「復原」
 - 新增時用「📅 今天 ▾」選日期，或「無日期」
@@ -71,11 +72,7 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 
 ### 7. 執行並登入
 
-```bash
-./start.sh
-```
-
-按 ①「登入」：
+點兩下 `start.bat`，按 ①「登入」：
 
 <p align="center"><img src="images/10-login-button.png" width="320" alt="登入按鈕"></p>
 
@@ -91,7 +88,9 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 
 ## 使用
 
-`start.sh` 可重複執行：已開啟時會先關閉舊的再開新的（也可直接 `pythonw daynote.pyw`）。
+點兩下 `start.bat` 啟動，背景執行、無命令列視窗。重複執行時舊的會自動關閉，只留一個。
+
+點工作列圖示可縮到背景，再點一次叫回；按 Win + D 時 DayNote 仍留在桌面。
 
 | 快捷鍵 | 功能 |
 |---|---|
@@ -101,7 +100,15 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 | `F5` | 同步 |
 | `Esc` | 離開輸入框／詳細頁 |
 
-**開機啟動**：`Win+R` → `shell:startup` → 新增捷徑，目標填 `"<pythonw.exe 路徑>" "D:\DayNote\daynote.pyw"`。
+**開機自動啟動**：
+
+```bash
+./autostart.sh on       # 開啟（在 Windows「啟動」資料夾建立捷徑）
+./autostart.sh off      # 關閉
+./autostart.sh status   # 查看狀態
+```
+
+開機後以 `pythonw` 在背景執行，不會出現命令列視窗。
 
 **避免每 7 天重新登入**：「目標對象」→「發布應用程式」。個人使用免審核。
 
@@ -113,6 +120,7 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 | `ca_file` | `""` | 公司網路出現「TLS 憑證驗證失敗」時，填根憑證（PEM）路徑 |
 | `borderless` | `true` | `false` 改回一般視窗 |
 | `pin_to_desktop` | `true` | Win + D 後仍顯示 |
+| `holiday_calendar` | 台灣假日 | Google 公開假日日曆 ID；`""` 關閉 |
 
 ## 常見問題
 
@@ -131,6 +139,7 @@ Windows 桌面便利貼：月曆＋待辦，與 Google Tasks／Google 日曆同�
 
 - Google Tasks API 不支援：星號、幾點提醒、粗體等格式、圖片
 - 日曆只讀主日曆，不能編輯
+- 節日資料來自 Google 台灣假日日曆，不含補班日
 - 子工作一律顯示在父工作下方
 - 跨清單搬移工作請用 Google Tasks App
 - 刪除無法在 DayNote 復原
