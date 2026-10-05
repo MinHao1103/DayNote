@@ -4,5 +4,6 @@
   "ca_file": "",
   "borderless": true,
   "pin_to_desktop": true,
+  "show_in_taskbar": false,
   "desktop_reminder": true
 }

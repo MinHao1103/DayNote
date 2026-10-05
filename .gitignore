@@ -1,10 +1,16 @@
-# 機密：OAuth 用戶端密鑰、加密後的登入憑證
-config.json
-token.bin
+# 個人資料：Google 用戶端設定、登入憑證、視窗狀態（只保留設定範本）
+data/*
+!data/config.example.json
 
-# 程式自動產生的本機狀態
-daynote_state.json
+# 舊版放在根目錄的個人檔案（新版啟動時會自動搬進 data，搬完前也不可上傳）
+/config.json
+/token.bin
+/daynote_state.json
+/daynote.pid
+
+# 可攜版打包輸出（tools/build_portable.py）與可攜版內附的 Python
+dist/
+runtime/
+
+# Python 快取
 __pycache__/
-
-# start.sh 用來辨識執行中的 DayNote
-daynote.pid

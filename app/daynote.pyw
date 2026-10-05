@@ -30,14 +30,38 @@ import urllib.request
 import webbrowser
 import winsound
 from ctypes import wintypes
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 APP = "DayNote"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-TOKEN_PATH = os.path.join(BASE_DIR, "token.bin")
-STATE_PATH = os.path.join(BASE_DIR, "daynote_state.json")  # 視窗位置等狀態，由程式自動寫入
-PID_PATH = os.path.join(BASE_DIR, "daynote.pid")  # 執行中的程序編號，供 start.sh 關閉舊的再開新的
+# 資料夾結構：DayNote\app\daynote.pyw（程式）、DayNote\data\（個人資料，不上傳、不打包）
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(APP_DIR)
+DATA_DIR = os.path.join(ROOT_DIR, "data")
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")   # Google 用戶端設定
+TOKEN_PATH = os.path.join(DATA_DIR, "token.bin")      # DPAPI 加密的登入憑證
+STATE_PATH = os.path.join(DATA_DIR, "state.json")     # 視窗位置、提醒記錄等，由程式自動寫入
+PID_PATH = os.path.join(DATA_DIR, "daynote.pid")      # 執行中的程序編號，用來只保留一個 DayNote
+# 舊版（所有檔案放在同一層）的位置 → 新位置；啟動時自動搬移
+LEGACY_FILES = {"config.json": CONFIG_PATH, "token.bin": TOKEN_PATH, "daynote_state.json": STATE_PATH}
+
+
+def migrate_legacy_files():
+    """把舊版放在 DayNote 根目錄的個人檔案搬進 data 資料夾；新位置已有檔案時不覆蓋。
+
+    舊版的 daynote.pid 直接刪除：仍在執行的舊版 DayNote 看到 PID 檔消失會自行關閉，避免同時開兩個。
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    for old_name, new_path in LEGACY_FILES.items():
+        old_path = os.path.join(ROOT_DIR, old_name)
+        if os.path.exists(old_path) and not os.path.exists(new_path):
+            try:
+                os.replace(old_path, new_path)
+            except OSError:
+                pass  # 搬不動（例如被占用）就留在原處，下次啟動再試
+    try:
+        os.remove(os.path.join(ROOT_DIR, "daynote.pid"))
+    except OSError:
+        pass
 
 # 最小權限：Tasks 讀寫、日曆事件唯讀（不含日曆清單與設定）
 SCOPES = ("https://www.googleapis.com/auth/tasks "
@@ -116,6 +140,10 @@ class NeedLogin(Exception):
     """需要（重新）登入 Google。"""
 
 
+class ConfigMissing(Exception):
+    """還沒設定 Google 用戶端（沒有 config.json 或仍是範例值），需要首次設定。"""
+
+
 class ApiError(Exception):
     """可直接顯示給使用者的錯誤訊息。"""
 
@@ -123,13 +151,15 @@ class ApiError(Exception):
 # ---------------------------------------------------------------- 設定與憑證
 
 def load_config():
-    """讀取 config.json，client_id 未填時拋出 ValueError。"""
+    """讀取 config.json；還沒設定用戶端時拋出 ConfigMissing，格式錯誤時拋出 ValueError。"""
+    if not os.path.exists(CONFIG_PATH):
+        raise ConfigMissing("找不到 config.json")
     with open(CONFIG_PATH, encoding="utf-8") as f:
         # JSON 不支援註解；允許整行以 // 開頭的註解（方便保留備份設定）
         lines = [ln for ln in f.read().splitlines() if not ln.lstrip().startswith("//")]
     cfg = json.loads("\n".join(lines))
     if not cfg.get("client_id") or cfg["client_id"].startswith("<"):
-        raise ValueError("請在 config.json 填入 client_id 與 client_secret")
+        raise ConfigMissing("config.json 尚未填入 client_id 與 client_secret")
     return cfg
 
 
@@ -270,41 +300,81 @@ def win_add_appwindow(widget):
         pass
 
 
-def win_other_app_windows_visible(widget):
-    """除了 DayNote 之外，是否還有正常顯示（未縮小）的程式視窗。
+WM_SYSCOMMAND, SC_MINIMIZE, GWLP_WNDPROC = 0x0112, 0xF020, -4
+_WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
 
-    用來區分縮小的原因：Win + D 會把所有程式視窗縮掉（實測剩 0 個）；點工作列只會縮 DayNote。
+
+WM_HOTKEY = 0x0312
+HOTKEY_ID = 1
+MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
+VK_D = 0x44
+
+
+def win_hook_messages(widget, on_user_minimize=None, on_hotkey=None):
+    """攔截視窗訊息，原封不動交給 tkinter 處理，只額外通知：
+
+    - SC_MINIMIZE：使用者點工作列（或 Win + ↓）要求縮小；Win + D 不會送這個
+    - WM_HOTKEY：全域快捷鍵（Ctrl + Alt + D）
+    回呼裡不可直接操作 tkinter，請只排入佇列。回傳要保留的 callback 參考；失敗回傳 None。
     """
-    own = _hwnd(widget)
-    found = []
     try:
         user32 = _user32()
-        user32.GetWindow.argtypes = [wintypes.HWND, ctypes.c_uint]
-        user32.GetWindow.restype = wintypes.HWND
-        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-        dwmapi = ctypes.WinDLL("dwmapi")
-        skip_classes = ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+        user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, ctypes.c_uint,
+                                           wintypes.WPARAM, wintypes.LPARAM]
+        user32.CallWindowProcW.restype = ctypes.c_ssize_t
+        hwnd = _hwnd(widget)
+        state = {}
 
-        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        def check(hwnd, _):
-            if hwnd == own or not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
-                return True
-            cloaked = ctypes.c_int(0)  # 隱藏中的 UWP 視窗（DWMWA_CLOAKED）
-            dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
-            ex, st = user32.GetWindowLongW(hwnd, GWL_EXSTYLE), user32.GetWindowLongW(hwnd, GWL_STYLE)
-            is_app = (ex & WS_EX_APPWINDOW) or (not user32.GetWindow(hwnd, 4) and st & 0x00C00000)
-            if cloaked.value or ex & WS_EX_TOOLWINDOW or not is_app:
-                return True
-            buf = ctypes.create_unicode_buffer(64)
-            user32.GetClassNameW(hwnd, buf, 64)
-            if buf.value not in skip_classes:
-                found.append(hwnd)
-                return False  # 找到一個就夠了
-            return True
-        user32.EnumWindows(check, 0)
+        def proc(h, msg, wparam, lparam):
+            if msg == WM_SYSCOMMAND and (wparam & 0xFFF0) == SC_MINIMIZE and on_user_minimize:
+                on_user_minimize()
+            elif msg == WM_HOTKEY and wparam == HOTKEY_ID and on_hotkey:
+                on_hotkey()
+            return user32.CallWindowProcW(state["old"], h, msg, wparam, lparam)
+
+        callback = _WNDPROC(proc)
+        state["old"] = user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ctypes.cast(callback, ctypes.c_void_p))
+        return callback if state["old"] else None
     except (OSError, AttributeError):
-        return True  # 判斷不了時當作工作列點擊，不自動還原
-    return bool(found)
+        return None
+
+
+def win_register_hotkey(widget):
+    """註冊全域快捷鍵 Ctrl + Alt + D；被其他程式占用時回傳 False。"""
+    try:
+        user32 = ctypes.WinDLL("user32")
+        user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+        return bool(user32.RegisterHotKey(_hwnd(widget), HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_D))
+    except (OSError, AttributeError):
+        return False
+
+
+def win_unregister_hotkey(widget):
+    try:
+        user32 = ctypes.WinDLL("user32")
+        user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.UnregisterHotKey(_hwnd(widget), HOTKEY_ID)
+    except (OSError, AttributeError):
+        pass
+
+
+def win_set_background_window(widget):
+    """背景模式：設為工具視窗，不出現在工作列與 Alt + Tab（需重新顯示視窗才會套用）。"""
+    try:
+        user32 = _user32()
+        hwnd = _hwnd(widget)
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+    except (OSError, AttributeError):
+        pass
+
+
+def win_is_background_window(widget):
+    try:
+        style = _user32().GetWindowLongW(_hwnd(widget), GWL_EXSTYLE)
+        return bool(style & WS_EX_TOOLWINDOW) and not style & WS_EX_APPWINDOW
+    except (OSError, AttributeError):
+        return False
 
 
 def win_is_minimized(widget):
@@ -1028,7 +1098,7 @@ class App(tk.Tk):
     """主視窗。網路工作一律丟到背景執行緒，結果經 queue 交回主執行緒更新畫面。"""
 
     def __init__(self, google, borderless=True, pin_to_desktop=True, watch_pid=False,
-                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR, desktop_reminder=True):
+                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR, desktop_reminder=True, show_in_taskbar=False):
         super().__init__()
         apply_dpi_scale(self)
         self.g = google
@@ -1037,7 +1107,10 @@ class App(tk.Tk):
         self.minsize(*MIN_SIZE)
         self.state_data = load_state()
         self.borderless = borderless
+        # 背景模式（預設）：不顯示工作列圖示；只有無邊框時可用，一般視窗維持系統預設
+        self.show_in_taskbar = show_in_taskbar or not borderless
         self.in_taskbar = not borderless
+        self.hotkey_ok = False
         self.topmost = bool(self.state_data.get("topmost", False))
         self._drag_offset = None
         self._resize_start = None
@@ -1112,17 +1185,65 @@ class App(tk.Tk):
         self.update_idletasks()  # 確保 Windows 視窗已建立，否則設定會套到錯誤的 HWND
         if self.pin_to_desktop:
             win_pin_to_desktop(self)
-            # 「可縮小」讓工作列點擊能縮到背景，但 Win + D 也會因此縮掉視窗；
-            # 被縮小時若其他程式視窗也全被縮掉（Win + D），就立刻還原，維持釘在桌面
-            self.bind("<Unmap>", lambda e: e.widget is self and self.after(150, self._undo_show_desktop))
         win_round_corners(self)
+        if not self.show_in_taskbar:
+            # 背景模式：工具視窗不在工作列，也沒有「可縮小」樣式，Win + D 不會影響它
+            win_set_background_window(self)
+            self.withdraw()
+            self.after(10, self.deiconify)
+            self.after(200, self._finish_background_setup)
+            return
+        if self.pin_to_desktop:
+            # 「可縮小」讓工作列點擊能縮到背景，但 Win + D 也會因此縮掉視窗；
+            # 被縮小時若不是使用者要求的（攔截 SC_MINIMIZE 判斷），就是 Win + D，立刻還原
+            self.bind("<Unmap>", lambda e: e.widget is self and self.after(150, self._undo_show_desktop))
         self._reshow_with_appwindow(retries=1)
 
+    def _finish_background_setup(self):
+        if self.pin_to_desktop and not win_is_pinned(self):
+            win_pin_to_desktop(self)
+        self._install_hooks()
+
+    def _install_hooks(self):
+        """攔截視窗訊息並註冊 Ctrl + Alt + D。回呼只排入佇列，由主執行緒切換顯示。"""
+        if getattr(self, "_message_hook", None):
+            return
+        self._message_hook = win_hook_messages(
+            self, on_user_minimize=self._mark_user_minimize,
+            on_hotkey=lambda: self.q.put((lambda *_: self.toggle_visible(), None, None)))
+        if self._message_hook:
+            self._register_hotkey(retries=6)
+
+    def _register_hotkey(self, retries):
+        """註冊 Ctrl + Alt + D。重新啟動時舊的 DayNote 最多 1 秒後才關閉並釋放快捷鍵，所以失敗會每秒重試。"""
+        self.hotkey_ok = win_register_hotkey(self)
+        if self.hotkey_ok:
+            return
+        if retries:
+            self.after(1000, lambda: self._register_hotkey(retries - 1))
+        else:
+            self._set_status("Ctrl + Alt + D 已被其他程式占用；隱藏後請再點 StartDayNote.bat 叫回", error=True)
+
+    def toggle_visible(self):
+        """Ctrl + Alt + D：隱藏中就叫回來並放到最前面，顯示中就隱藏。"""
+        if self.state() == "withdrawn":
+            self.deiconify()
+            self.lift()
+            self.attributes("-topmost", True)  # 暫時置頂確保出現在最前面
+            self.after(300, lambda: self.attributes("-topmost", self.topmost))
+            self.focus_force()
+        else:
+            self.withdraw()
+
+    def _mark_user_minimize(self):
+        self._self_minimize_until = time.time() + 1.5
+
     def _undo_show_desktop(self):
+        """被縮小時：若不是使用者要求的（工作列、Win + ↓、「—」按鈕），就是 Win + D，叫回桌面上。"""
         if time.time() < getattr(self, "_self_minimize_until", 0):
-            return  # 使用者自己按「—」縮小，不是 Win + D
-        if win_is_minimized(self) and not win_other_app_windows_visible(self):
-            win_show_no_activate(self)  # 所有視窗都被縮掉＝Win + D，DayNote 留在桌面上
+            return
+        if win_is_minimized(self):
+            win_show_no_activate(self)
 
     def _reshow_with_appwindow(self, retries):
         """套用工作列樣式並重新顯示；等視窗真的顯示後再確認，沒套上就重試。"""
@@ -1137,6 +1258,7 @@ class App(tk.Tk):
             win_pin_to_desktop(self)
         self.in_taskbar = win_has_appwindow(self)
         if self.in_taskbar:
+            self._install_hooks()
             return
         if retries:
             self._reshow_with_appwindow(retries - 1)
@@ -1170,9 +1292,11 @@ class App(tk.Tk):
                             bg=HOVER if self.topmost else BG)
 
     def minimize(self):
+        if not self.show_in_taskbar:
+            self.withdraw()  # 背景模式：隱藏視窗，程式與提醒照常執行；Ctrl + Alt + D 叫回
+            return
         if self.borderless:
-            # 自己按「—」縮小時，暫停 Win + D 自動還原，避免被誤判叫回來
-            self._self_minimize_until = time.time() + 1.5
+            self._mark_user_minimize()  # 自己按「—」縮小，不是 Win + D
             win_minimize(self)
         else:
             self.iconify()
@@ -1183,6 +1307,8 @@ class App(tk.Tk):
             state.update(x=self.winfo_x(), y=self.winfo_y(),
                          w=self.winfo_width(), h=self.winfo_height())
         save_state(state)
+        if self.hotkey_ok:
+            win_unregister_hotkey(self)
         if getattr(self, "_poll_job", None):
             self.after_cancel(self._poll_job)
         self.destroy()
@@ -1218,7 +1344,9 @@ class App(tk.Tk):
         self.btn_pin.bind("<Leave>", lambda e: self._paint_pin(), add="+")
         self.btn_pin.pack(side="left")
         self._paint_pin()
-        self.btn_min = self._icon_button(tools, "—", self.minimize, tip="縮小到工作列")
+        self.btn_min = self._icon_button(
+            tools, "—", self.minimize,
+            tip=lambda: "縮小到工作列" if self.show_in_taskbar else "隱藏到背景（Ctrl + Alt + D 叫回）")
         btn_close = self._icon_button(tools, "✕", self.close, tip="關閉")
         if self.borderless:
             self.btn_min.pack(side="left")
@@ -1934,7 +2062,7 @@ class App(tk.Tk):
         save_state(self.state_data)
 
     def _watch_pid(self):
-        """單一執行個體：PID 檔被移除或換成別的 PID（start.sh 或新開的 DayNote），就正常關閉並存好狀態。"""
+        """單一執行個體：PID 檔被移除或換成別的 PID（新開的 DayNote），就正常關閉並存好狀態。"""
         try:
             with open(PID_PATH, encoding="ascii") as f:
                 still_mine = f.read().strip() == str(os.getpid())
@@ -2178,21 +2306,124 @@ class App(tk.Tk):
             self._poll_job = self.after(100, self._poll_queue)
 
 
+# ---------------------------------------------------------------- 首次設定引導
+
+HELP_URL = "https://github.com/MinHao1103/DayNote/blob/main/docs/SETUP_GUIDE.md"  # 新手設定教學（含圖）
+
+
+def parse_client_json(path):
+    """讀取 Google Cloud Console 下載的用戶端 JSON，回傳 (client_id, client_secret)。
+
+    電腦版應用程式的格式為 {"installed": {"client_id": ..., "client_secret": ...}}。
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("檔案內容不是用戶端設定")
+    if "web" in data and "installed" not in data:
+        raise ValueError("這是「網頁應用程式」用戶端，請改建立「電腦版應用程式」類型")
+    info = data.get("installed", data)
+    client_id, secret = info.get("client_id", ""), info.get("client_secret", "")
+    if not client_id.endswith(".apps.googleusercontent.com") or not secret:
+        raise ValueError("找不到 client_id 或 client_secret，請確認是從 Google Cloud Console 下載的用戶端 JSON")
+    return client_id, secret
+
+
+def write_config(client_id, client_secret):
+    """寫入 config.json；原本的檔案能讀就保留其他設定，只更新用戶端。"""
+    cfg = {"client_id": "", "client_secret": "", "ca_file": ""}
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            lines = [ln for ln in f.read().splitlines() if not ln.lstrip().startswith("//")]
+        old = json.loads("\n".join(lines))
+        if isinstance(old, dict):
+            cfg.update(old)
+    except (OSError, ValueError):
+        pass
+    cfg.update(client_id=client_id, client_secret=client_secret)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def run_setup_wizard():
+    """沒有 config.json（或仍是範例值）時的首次設定視窗。完成回傳設定，取消回傳 None。"""
+    root = tk.Tk()
+    apply_dpi_scale(root)
+    root.title("DayNote 首次設定")
+    root.configure(bg=BG, padx=px(24), pady=px(20))
+    root.resizable(False, False)
+    result = {"cfg": None}
+
+    tk.Label(root, text="歡迎使用 DayNote", bg=BG, fg=TEXT, font=("Microsoft JhengHei UI", 15, "bold"),
+             anchor="w").pack(fill="x")
+    steps = ("第一次使用需要一個 Google 金鑰檔（client_secret_….json）。\n\n"
+             "還沒有：按「開啟設定教學」，照步驟做完就會下載這個檔案。\n"
+             "已經有：按「選擇金鑰檔…」，到「下載」資料夾選它。")
+    tk.Label(root, text=steps, bg=BG, fg=TEXT, font=FONT, justify="left", anchor="w",
+             wraplength=px(380)).pack(fill="x", pady=(px(10), px(14)))
+    message = tk.Label(root, text="", bg=BG, fg=RED, font=SMALL, justify="left", anchor="w", wraplength=px(380))
+
+    def choose():
+        downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+        path = filedialog.askopenfilename(
+            parent=root, title="選擇 Google 金鑰檔（檔名 client_secret_ 開頭）",
+            initialdir=downloads if os.path.isdir(downloads) else None,
+            filetypes=[("Google 金鑰檔", "client_secret*.json"), ("JSON", "*.json"), ("所有檔案", "*.*")])
+        if not path:
+            return
+        try:
+            client_id, secret = parse_client_json(path)
+            write_config(client_id, secret)
+            result["cfg"] = load_config()
+        except (OSError, ValueError, ConfigMissing) as e:
+            message.config(text=f"無法使用這個檔案：{e}", fg=RED)
+            return
+        root.destroy()
+
+    buttons = tk.Frame(root, bg=BG)
+    buttons.pack(fill="x")
+    pick = tk.Label(buttons, text="選擇金鑰檔…", bg=ACCENT, fg="white", font=FONT, cursor="hand2",
+                    padx=px(14), pady=px(5))
+    pick.pack(side="left")
+    pick.bind("<Button-1>", lambda e: choose())
+    guide = tk.Label(buttons, text="開啟設定教學", bg=BG, fg=ACCENT, font=FONT, cursor="hand2", padx=px(12))
+    guide.pack(side="left")
+    guide.bind("<Button-1>", lambda e: webbrowser.open(HELP_URL))
+    cancel = tk.Label(buttons, text="取消", bg=BG, fg=GRAY, font=FONT, cursor="hand2")
+    cancel.pack(side="right")
+    cancel.bind("<Button-1>", lambda e: root.destroy())
+    message.pack(fill="x", pady=(px(10), 0))
+
+    root.update_idletasks()  # 置中
+    x = (root.winfo_screenwidth() - root.winfo_reqwidth()) // 2
+    y = (root.winfo_screenheight() - root.winfo_reqheight()) // 3
+    root.geometry(f"+{x}+{y}")
+    root.mainloop()
+    return result["cfg"]
+
+
 def main():
     enable_dpi_awareness()
+    migrate_legacy_files()
     try:
-        cfg = load_config()
+        try:
+            cfg = load_config()
+        except ConfigMissing:
+            cfg = run_setup_wizard()  # 首次執行：引導選擇 Google 用戶端 JSON
+            if not cfg:
+                return
         google = Google(cfg)
     except (OSError, ValueError, KeyError) as e:
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror(APP, f"設定檔有誤：{e}\n\n請參考 README.md 建立 config.json。")
+        messagebox.showerror(APP, f"設定檔有誤：{e}\n\n請修正 data\\config.json，或刪除它後重新啟動以進行首次設定。")
         return
     watch = write_pid()
     try:
         App(google, borderless=bool(cfg.get("borderless", True)),
             pin_to_desktop=bool(cfg.get("pin_to_desktop", True)), watch_pid=watch,
             desktop_reminder=bool(cfg.get("desktop_reminder", True)),
+            show_in_taskbar=bool(cfg.get("show_in_taskbar", False)),
             holiday_calendar=cfg.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)).mainloop()
     finally:
         remove_pid()
