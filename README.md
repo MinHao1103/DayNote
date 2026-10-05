@@ -27,9 +27,7 @@
 
 ## 第一步：下載 DayNote
 
-1. 打開 [下載頁面](https://github.com/MinHao1103/DayNote/releases/latest)，點 ①「DayNote.zip」，檔案會存到「下載」資料夾
-
-<img src="docs/images/guide/d01-release-download.png" alt="下載 DayNote.zip">
+1. 點這裡下載：**[DayNote.zip](https://github.com/MinHao1103/DayNote/releases/latest/download/DayNote.zip)**（永遠是最新版），檔案會存到「下載」資料夾
 
 2. 打開「下載」資料夾，對 `DayNote` 按**滑鼠右鍵** → ①「解壓縮全部…」
 
