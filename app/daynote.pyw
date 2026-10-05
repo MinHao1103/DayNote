@@ -2308,7 +2308,7 @@ class App(tk.Tk):
 
 # ---------------------------------------------------------------- 首次設定引導
 
-HELP_URL = "https://github.com/MinHao1103/DayNote/blob/main/docs/SETUP_GUIDE.md"  # 新手設定教學（含圖）
+HELP_URL = "https://github.com/MinHao1103/DayNote#第一次設定"  # README 的圖文設定教學
 
 
 def parse_client_json(path):

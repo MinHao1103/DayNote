@@ -24,7 +24,7 @@ DayNote\
 ├─ app\                  程式（daynote.pyw）
 ├─ data\                 個人資料：config.json、token.bin、state.json（不上傳、不打包）
 ├─ tools\                開發用：build_portable.py（打包可攜版）
-├─ docs\                 新手設定教學（SETUP_GUIDE.md）與截圖
+├─ docs\images\          README 截圖
 ├─ runtime\              可攜版才有：內附的 Python
 └─ dist\                 打包輸出（不上傳）
 ```
@@ -42,12 +42,135 @@ DayNote\
 
 換電腦時：解壓縮可攜版（或複製整個資料夾，含 `data\config.json`），重新登入一次即可；`data\token.bin` 綁定原本的 Windows 帳號，無法沿用。
 
-### 第一次設定
+## 第一次設定
 
-1. 點兩下 `StartDayNote.bat`
-2. 跳出「首次設定」視窗後，照 **[新手設定教學（含圖）](docs/SETUP_GUIDE.md)** 做，約 10 分鐘
+約 10 分鐘，只需做一次。需要一個 Gmail 帳號。圖中紅框 **①②③** 是要點的地方。
+
+### 1. 開啟 DayNote
+
+點兩下 `StartDayNote.bat`，會跳出「首次設定」視窗。先放著，照下面步驟取得金鑰檔。
 
 <img src="docs/images/15-setup-wizard.png" alt="首次設定視窗">
+
+### 2. 建立 Google Cloud 專案
+
+1. 打開 <https://console.cloud.google.com/>，用 Gmail 登入（第一次會要你同意條款：勾選 → 同意並繼續）
+2. 網址列貼上 <https://console.cloud.google.com/projectcreate>
+3. ① 專案名稱輸入 `DayNote` → ② 按「建立」
+
+<img src="docs/images/guide/g02-new-project.png" alt="新增專案">
+
+4. 右上角跳出通知，按 ①「選取專案」
+
+<img src="docs/images/guide/g03-project-created.png" alt="選取專案">
+
+5. 確認左上角 ① 顯示 `DayNote`
+
+<img src="docs/images/guide/g04-project-selected.png" alt="確認專案">
+
+### 3. 開啟 Google Tasks API
+
+1. ① 最上方搜尋框輸入 `Google Tasks API` → 點 ② 第一個結果（**不是** Cloud Tasks）
+
+<img src="docs/images/guide/g05-search-tasks.png" alt="搜尋 Google Tasks API">
+
+2. 按 ①「啟用」
+
+<img src="docs/images/guide/g06-tasks-enable.png" alt="啟用 Tasks API">
+
+3. 看到 ①「已啟用」就完成
+
+<img src="docs/images/guide/g07-tasks-enabled.png" alt="已啟用">
+
+### 4. 開啟 Google Calendar API
+
+搜尋框輸入 `Google Calendar API` → 點第一個結果 → 按 ①「啟用」
+
+<img src="docs/images/guide/g08-calendar-enable.png" alt="啟用 Calendar API">
+
+### 5. 設定同意畫面
+
+1. 網址列貼上 <https://console.cloud.google.com/auth/overview> → 按 ①「開始」
+
+<img src="docs/images/guide/g09-auth-start.png" alt="開始">
+
+2. 應用程式資訊：① 名稱輸入 `DayNote` → ② 電子郵件選你的 Gmail → ③「下一步」
+
+<img src="docs/images/guide/g10-consent-1-app.png" alt="應用程式資訊">
+
+3. 目標對象：① 選「外部」→ ②「下一步」
+
+<img src="docs/images/guide/g11-consent-2-audience.png" alt="目標對象">
+
+4. 聯絡資訊：① 輸入你的 Gmail → ②「下一步」
+
+<img src="docs/images/guide/g12-consent-3-contact.png" alt="聯絡資訊">
+
+5. 完成：① 勾選「我同意」→ ②「繼續」
+
+<img src="docs/images/guide/g13-consent-4-agree.png" alt="同意">
+
+6. 按 ①「建立」
+
+<img src="docs/images/guide/g14-consent-create.png" alt="建立">
+
+### 6. 加入自己為測試使用者
+
+1. 點左側 ①「目標對象」
+
+<img src="docs/images/guide/g15-oauth-overview.png" alt="目標對象">
+
+2. 往下捲，按 ①「Add users」→ ② 輸入你的 Gmail，按 Enter → ③「儲存」
+
+<img src="docs/images/guide/g16-add-test-user.png" alt="新增測試使用者">
+
+3. 確認 ① 清單出現你的 Gmail
+
+<img src="docs/images/guide/g17-test-user-list.png" alt="測試使用者清單">
+
+### 7. 建立並下載金鑰檔
+
+1. 點左側 ①「用戶端」→ ②「建立用戶端」
+
+<img src="docs/images/guide/g18-clients-page.png" alt="用戶端">
+
+2. 應用程式類型選 ①「**電腦版應用程式**」（最後一個）
+
+<img src="docs/images/guide/g19-client-type.png" alt="電腦版應用程式">
+
+3. ② 名稱輸入 `DayNote` → ③ **不要勾** → ④「建立」
+
+<img src="docs/images/guide/g20-client-form.png" alt="建立用戶端">
+
+4. 按 ①「**下載 JSON**」，檔案會存到「下載」資料夾（檔名 `client_secret_` 開頭）→ 按「確定」
+
+<img src="docs/images/guide/g21-client-created.png" alt="下載 JSON">
+
+> ⚠️ 關掉這個視窗就不能再下載。沒下載到：回「用戶端」刪除 DayNote，重做第 7 步。
+
+### 8. 選擇金鑰檔
+
+回到 DayNote 的「首次設定」視窗 → 按 ②「選擇金鑰檔…」→ 選「下載」資料夾裡 `client_secret_` 開頭的檔案 → 按「開啟」
+
+<img src="docs/images/15-setup-wizard.png" alt="選擇金鑰檔">
+
+### 9. 登入
+
+1. 按右上角 ①「登入」，瀏覽器會打開 → 選你的 Gmail
+
+<p><img src="docs/images/10-login-button.png" width="320" alt="登入"></p>
+
+2. 出現「未經 Google 驗證」→ 按 ①「繼續」
+
+<img src="docs/images/11-unverified.png" alt="未經驗證">
+
+3. ① 勾選「全選」→ ③「繼續」
+
+<img src="docs/images/12-consent.png" alt="授權">
+
+4. 看到 ① 這行字，關掉分頁。**完成！**
+
+<img src="docs/images/13-login-done.png" alt="完成">
 
 ## 使用
 
