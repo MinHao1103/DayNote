@@ -40,7 +40,25 @@ DayNote\
 
 ### 下載（不需要 git）
 
-**可攜版（建議）**：下載 [DayNote-portable.zip](https://github.com/MinHao1103/DayNote/releases/latest/download/DayNote-portable.zip) → 右鍵「解壓縮全部」→ 點兩下 `DayNote\StartDayNote.bat`，接著做「第一次設定」。不用裝 Python。
+**可攜版（建議，不用裝 Python）**
+
+1. 打開 [Release 頁面](https://github.com/MinHao1103/DayNote/releases/latest)，點 ①「DayNote-portable.zip」，檔案會存到「下載」資料夾（約 16 MB）
+
+<img src="docs/images/guide/d01-release-download.png" alt="下載可攜版">
+
+2. 打開「下載」資料夾，對 `DayNote-portable` 按右鍵 → ①「解壓縮全部…」
+
+<img src="docs/images/guide/d02-extract-menu.png" width="480" alt="解壓縮全部">
+
+3. 按 ①「解壓縮」（想放別的地方，先按「瀏覽」選資料夾）
+
+<img src="docs/images/guide/d03-extract-dialog.png" width="560" alt="解壓縮">
+
+4. 解壓縮完會自動開啟資料夾，點兩下進入 `DayNote` 資料夾 → 點兩下 ①「StartDayNote」，接著做下面的「第一次設定」
+
+<img src="docs/images/guide/d04-start-bat.png" width="480" alt="StartDayNote">
+
+> 檔案總管預設不顯示副檔名，所以看到的是 `DayNote-portable`、`StartDayNote`，不是 `.zip`、`.bat`。
 
 **原始碼版**：
 
