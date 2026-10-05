@@ -68,6 +68,7 @@ SCOPES = ("https://www.googleapis.com/auth/tasks "
           "https://www.googleapis.com/auth/calendar.events.readonly")
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 TASKS_API = "https://tasks.googleapis.com/tasks/v1"
 CAL_API = "https://www.googleapis.com/calendar/v3"
 # Google 提供的台灣節慶假日公開日曆；可在 config.json 的 holiday_calendar 改成其他地區或設空字串關閉
@@ -573,6 +574,22 @@ class Google:
         self.access_token = None
         self.refresh_token = None
         delete_refresh_token()
+
+    def revoke(self):
+        """撤銷 Google 授權並登出；不論撤銷成敗，本機登入資料一律刪除。
+
+        @return True：Google 已撤銷（或授權早已失效）；False：連不上 Google，需到帳號頁面手動移除
+        """
+        token = self.refresh_token
+        try:
+            if not token:
+                return True
+            status, _, _ = self._http("POST", REVOKE_URL, {"token": token}, form=True)
+            return status in (200, 400)  # 400 invalid_token：授權早已失效，視同已撤銷
+        except ApiError:
+            return False
+        finally:
+            self.logout()
 
     def _ensure_access(self):
         """確保有可用的 access token；過期時用 refresh token 更新，更新失敗則要求重新登入。"""
@@ -1388,6 +1405,8 @@ class App(tk.Tk):
                                   padx=px(8), cursor="hand2")
         self.btn_login.bind("<Button-1>", lambda e: self.login())
         Tooltip(self.btn_login, "用瀏覽器登入 Google 帳號")
+        self.btn_logout = self._icon_button(tools, "登出", self.logout, font=FONT,
+                                            tip="登出 Google 並撤銷 DayNote 的存取權")
         self.btn_refresh = self._icon_button(tools, "⟳", self.refresh, tip="立即同步（F5）")
         self.btn_refresh.pack(side="left")
         self.btn_pin = self._icon_button(
@@ -1999,7 +2018,7 @@ class App(tk.Tk):
         if isinstance(err, NeedLogin):
             self._refresh_list_values()  # 下拉選單顯示「請先登入」
             self._draw_list()            # 清單區顯示登入提示
-            self.btn_login.pack(side="left", padx=(0, 4), before=self.btn_refresh)
+            self._show_login_button(True)
             self._set_status(str(err), error=True)
         elif isinstance(err, ApiError):
             self._set_status(str(err), error=True)
@@ -2183,8 +2202,40 @@ class App(tk.Tk):
         if err:
             self._show_error(err)
             return
-        self.btn_login.pack_forget()
+        self._show_login_button(False)
         self.refresh()
+
+    def _show_login_button(self, show):
+        """未登入顯示「登入」，已登入顯示「登出」，兩者在同一個位置切換。"""
+        if show:
+            self.btn_logout.pack_forget()
+            self.btn_login.pack(side="left", padx=(0, 4), before=self.btn_refresh)
+        else:
+            self.btn_login.pack_forget()
+            self.btn_logout.pack(side="left", before=self.btn_refresh)
+
+    def logout(self):
+        if self.busy or not self.g.refresh_token:
+            return
+        if not messagebox.askyesno("登出", "確定要登出 Google？\n\n會撤銷 DayNote 的存取權，並刪除這台電腦上的登入資料，"
+                                   "之後需要重新登入。", parent=self):
+            return
+        self.close_detail()  # 詳細頁有修改時先儲存
+        self.busy = True
+        self._set_status("正在登出…")
+        self.run_bg(self.g.revoke, self._after_logout)
+
+    def _after_logout(self, revoked, err):
+        self.busy = False
+        self.lists, self.tasks, self.events = [], [], {}
+        self._refresh_list_values()
+        self.redraw()
+        self._show_login_button(True)
+        if revoked:
+            self._set_status("已登出")
+        else:
+            self._set_status("已刪除本機登入資料，但無法連線 Google 撤銷授權；\n"
+                             "請到 myaccount.google.com/connections 移除 DayNote", error=True)
 
     def refresh(self):
         if self.busy:
@@ -2243,7 +2294,7 @@ class App(tk.Tk):
             self._show_error(err)
             return
         view, self.lists, self.tasks, self.events, self.holidays = result
-        self.btn_login.pack_forget()
+        self._show_login_button(False)
         self._refresh_list_values()
         list_ids = [lst["id"] for lst in self.lists]
         last = self.state_data.get("last_list_id")
