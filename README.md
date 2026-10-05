@@ -35,18 +35,18 @@ DayNote\
 
 | 版本 | 適合 | 需要安裝 |
 |---|---|---|
-| **可攜版**（[`DayNote-portable.zip`](https://github.com/MinHao1103/DayNote/releases/latest/download/DayNote-portable.zip)） | 一般使用、換電腦 | 不需要，內附 Python，解壓縮即可 |
+| **可攜版**（[`DayNote.zip`](https://github.com/MinHao1103/DayNote/releases/latest/download/DayNote.zip)） | 一般使用、換電腦 | 不需要，內附 Python，解壓縮即可 |
 | 原始碼版（本 repo） | 開發 | [Python 3.10+](https://www.python.org/downloads/)（保留預設勾選的 tcl/tk） |
 
 ### 下載（不需要 git）
 
 **可攜版（建議，不用裝 Python）**
 
-1. 打開 [Release 頁面](https://github.com/MinHao1103/DayNote/releases/latest)，點 ①「DayNote-portable.zip」，檔案會存到「下載」資料夾（約 16 MB）
+1. 打開 [Release 頁面](https://github.com/MinHao1103/DayNote/releases/latest)，點 ①「DayNote.zip」，檔案會存到「下載」資料夾（約 16 MB）
 
 <img src="docs/images/guide/d01-release-download.png" alt="下載可攜版">
 
-2. 打開「下載」資料夾，對 `DayNote-portable` 按右鍵 → ①「解壓縮全部…」
+2. 打開「下載」資料夾，對 `DayNote` 按右鍵 → ①「解壓縮全部…」
 
 <img src="docs/images/guide/d02-extract-menu.png" width="480" alt="解壓縮全部">
 
@@ -54,11 +54,11 @@ DayNote\
 
 <img src="docs/images/guide/d03-extract-dialog.png" width="560" alt="解壓縮">
 
-4. 解壓縮完會自動開啟資料夾，點兩下進入 `DayNote` 資料夾 → 點兩下 ①「StartDayNote」，接著做下面的「第一次設定」
+4. 解壓縮完會自動開啟 `DayNote` 資料夾 → 點兩下 ①「StartDayNote」，接著做下面的「第一次設定」
 
 <img src="docs/images/guide/d04-start-bat.png" width="480" alt="StartDayNote">
 
-> 檔案總管預設不顯示副檔名，所以看到的是 `DayNote-portable`、`StartDayNote`，不是 `.zip`、`.bat`。
+> 檔案總管預設不顯示副檔名，所以看到的是 `DayNote`、`StartDayNote`，不是 `.zip`、`.bat`。
 
 **原始碼版**：
 
@@ -73,7 +73,7 @@ DayNote\
 
 ### 自己打包可攜版
 
-可攜版由原始碼版產生：`python tools\build_portable.py` → `dist/DayNote-portable.zip`（約 16 MB，不含任何個人檔案）。
+可攜版由原始碼版產生：`python tools\build_portable.py` → `dist/DayNote.zip`（約 16 MB，不含任何個人檔案）。
 
 換電腦時：解壓縮可攜版（或複製整個資料夾，含 `data\config.json`），重新登入一次即可；`data\token.bin` 綁定原本的 Windows 帳號，無法沿用。
 

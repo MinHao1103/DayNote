@@ -2,10 +2,9 @@
 
 用法（在已安裝 Python 3.10 以上、含 tcl/tk 的電腦，於 DayNote 資料夾執行）：
     python tools/build_portable.py
-產出：dist/DayNote-portable.zip
+產出：dist/DayNote.zip
 
-壓縮包內容：
-    DayNote/
+壓縮包內容（檔案直接放在最上層，Windows「解壓縮全部」會產生單層的 DayNote 資料夾）：
       StartDayNote.bat, SetupAutostart.bat, README.md
       app/                 程式
       data/                只有 config.example.json（個人資料一律不放）
@@ -85,12 +84,12 @@ def main():
     if leaked:
         sys.exit(f"壓縮包含有個人檔案，已中止：{leaked}")
 
-    zip_path = os.path.join(DIST, "DayNote-portable.zip")
+    zip_path = os.path.join(DIST, "DayNote.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for folder, _, files in os.walk(stage):
             for f in files:
                 full = os.path.join(folder, f)
-                zf.write(full, os.path.relpath(full, DIST))
+                zf.write(full, os.path.relpath(full, stage))  # 不含外層資料夾，避免解壓縮後變兩層
     print(f"完成：{zip_path}（{os.path.getsize(zip_path) / 1024 / 1024:.1f} MB）")
 
 
