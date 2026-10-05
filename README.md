@@ -35,8 +35,25 @@ DayNote\
 
 | 版本 | 適合 | 需要安裝 |
 |---|---|---|
-| **可攜版**（`DayNote-portable.zip`） | 一般使用、換電腦 | 不需要，內附 Python，解壓縮即可 |
+| **可攜版**（[`DayNote-portable.zip`](https://github.com/MinHao1103/DayNote/releases/latest/download/DayNote-portable.zip)） | 一般使用、換電腦 | 不需要，內附 Python，解壓縮即可 |
 | 原始碼版（本 repo） | 開發 | [Python 3.10+](https://www.python.org/downloads/)（保留預設勾選的 tcl/tk） |
+
+### 下載（不需要 git）
+
+**可攜版（建議）**：下載 [DayNote-portable.zip](https://github.com/MinHao1103/DayNote/releases/latest/download/DayNote-portable.zip) → 右鍵「解壓縮全部」→ 點兩下 `DayNote\StartDayNote.bat`，接著做「第一次設定」。不用裝 Python。
+
+**原始碼版**：
+
+1. 點這個連結下載：<https://github.com/MinHao1103/DayNote/archive/refs/heads/main.zip>
+   （或在本頁上方按綠色 **Code** → **Download ZIP**）
+2. 在「下載」資料夾對 `DayNote-main.zip` 按右鍵 →「解壓縮全部」→ 選要放的位置，例如 `D:\`
+3. 解壓後的 `DayNote-main` 資料夾就是 DayNote，可以改名成 `DayNote`
+4. 安裝 [Python 3.10+](https://www.python.org/downloads/)：保留預設選項，按「Install Now」即可
+5. 點兩下 `StartDayNote.bat`，接著做下面的「第一次設定」
+
+> 點兩下 `.bat` 若跳出「Windows 已保護您的電腦」：按「其他資訊」→「仍要執行」。
+
+### 自己打包可攜版
 
 可攜版由原始碼版產生：`python tools\build_portable.py` → `dist/DayNote-portable.zip`（約 16 MB，不含任何個人檔案）。
 
