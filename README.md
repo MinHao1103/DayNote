@@ -222,6 +222,43 @@ DayNote 不會出現在工作列與 Alt + Tab。按 `—` 隱藏到背景（提�
 | `holiday_calendar` | 台灣假日 | Google 公開假日日曆 ID；`""` 關閉 |
 | `desktop_reminder` | `true` | 電腦端右下角提醒；`false` 關閉 |
 
+## 不能執行 .bat 時（手動啟動）
+
+點兩下 `.bat` 沒反應、被公司電腦擋下，或一閃就關掉時，改用指令啟動：
+
+1. 打開 DayNote 資料夾（有 `StartDayNote.bat` 的那層）
+2. 點檔案總管上方的**網址列**，輸入 `powershell` 按 Enter，會開啟一個已經在這個資料夾的視窗
+3. 依版本貼上一行指令，按 Enter：
+
+| 版本 | 指令 |
+|---|---|
+| 可攜版（有 `runtime` 資料夾） | `.\runtime\pythonw.exe app\daynote.pyw` |
+| 原始碼版（有安裝 Python） | `pyw -3 app\daynote.pyw` |
+| 上一行顯示「找不到 pyw」 | `pythonw app\daynote.pyw` |
+
+執行後 PowerShell 視窗可以關掉，DayNote 會繼續執行。
+
+**啟動後沒畫面、想看錯誤訊息**：把指令裡的 `pythonw` 換成 `python`（`pyw` 換成 `py`），錯誤會顯示在 PowerShell 視窗：
+
+```powershell
+.\runtime\python.exe app\daynote.pyw   # 可攜版
+py -3 app\daynote.pyw                  # 原始碼版
+```
+
+**下載的檔案被 Windows 封鎖**（右鍵「內容」最下方有「解除封鎖」）：在同一個 PowerShell 視窗執行下面這行，解除整個資料夾的封鎖：
+
+```powershell
+Get-ChildItem -Recurse | Unblock-File
+```
+
+**不用 .bat 設定開機自動啟動**：按 `Win + R`，輸入 `shell:startup` 按 Enter → 在開啟的資料夾按右鍵「新增」→「捷徑」→ 位置貼上（路徑換成你的 DayNote 資料夾）：
+
+```
+"D:\DayNote\runtime\pythonw.exe" "D:\DayNote\app\daynote.pyw"
+```
+
+原始碼版只貼後半段：`"D:\DayNote\app\daynote.pyw"`。
+
 ## 常見問題
 
 <img src="docs/images/14-access-denied.png" alt="access_denied">
@@ -234,6 +271,7 @@ DayNote 不會出現在工作列與 Alt + Tab。按 `—` 隱藏到背景（提�
 | DayNote 顯示 HTTP 403 | 登入時權限沒全勾：刪除 `data\token.bin` 重新登入 |
 | 「登入已過期」 | 測試中的專案 7 天到期，重新登入 |
 | 視窗異常 | `data\config.json` 設 `"borderless": false` |
+| 點兩下 `.bat` 沒反應或被擋 | 見[不能執行 .bat 時](#不能執行-bat-時手動啟動) |
 
 ## 限制
 
