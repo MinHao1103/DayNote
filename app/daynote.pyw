@@ -727,8 +727,60 @@ def _set_bg(widget, color):
         widget.config(bg=color)
     except tk.TclError:
         pass
+    on_bg = getattr(widget, "on_bg", None)
+    if on_bg:  # 反鋸齒圓圈的邊緣混了底色，底色變了要換圖
+        on_bg(color)
     for child in widget.winfo_children():
         _set_bg(child, color)
+
+
+def _hex_rgb(color):
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def round_image(widget, size, fill, bg, outline=None, width=0, bg_below=None):
+    """Tk 的 Canvas 畫圓沒有反鋸齒，改用 4×4 超取樣算出邊緣混色後的圓形圖片。
+
+    @param size 直徑（實際像素）
+    @param fill 圓內顏色；只要外框時傳入底色
+    @param bg 圓外的底色
+    @param outline 外框顏色，None 表示實心圓
+    @param width 外框粗細（實際像素）
+    @param bg_below (列, 顏色)：從該列起底色不同，例如圓點跨過月曆選取框的下緣
+    @return tk.PhotoImage（依參數快取，同一張圖重複使用）
+    """
+    root = widget._root()
+    cache = root.__dict__.setdefault("_round_cache", {})
+    key = (size, fill, bg, outline, width, bg_below)
+    if key in cache:
+        return cache[key]
+    n = 4
+    r_out = size / 2
+    r_in = r_out - width if outline else r_out
+    fill_rgb, line_rgb = _hex_rgb(fill), _hex_rgb(outline or fill)
+    rows = []
+    for y in range(size):
+        back = _hex_rgb(bg_below[1] if bg_below and y >= bg_below[0] else bg)
+        line = []
+        for x in range(size):
+            outer = inner = 0
+            for sy in range(n):
+                dy = y + (sy + 0.5) / n - r_out
+                for sx in range(n):
+                    dx = x + (sx + 0.5) / n - r_out
+                    d2 = dx * dx + dy * dy
+                    if d2 <= r_out * r_out:
+                        outer += 1
+                        if d2 <= r_in * r_in:
+                            inner += 1
+            a_fill, a_line, a_bg = inner / n ** 2, (outer - inner) / n ** 2, 1 - outer / n ** 2
+            line.append("#%02x%02x%02x" % tuple(
+                round(f * a_fill + o * a_line + b * a_bg) for f, o, b in zip(fill_rgb, line_rgb, back)))
+        rows.append("{" + " ".join(line) + "}")
+    img = tk.PhotoImage(master=root, width=size, height=size)
+    img.put(" ".join(rows))
+    cache[key] = img
+    return img
 
 
 def _q(value):
@@ -1486,7 +1538,9 @@ class App(tk.Tk):
                     c.create_rectangle(x + px(2), cy - px(16), x + CELL_W - px(2), cy + px(16),
                                        fill=SELECTED, outline="")
                 if day == self.today:
-                    c.create_oval(cx - px(11), cy - px(11), cx + px(11), cy + px(11), fill=ACCENT, outline="")
+                    d = px(22)
+                    img = round_image(c, d, ACCENT, SELECTED if day == self.selected else BG)
+                    c.create_image(round(cx - d / 2), round(cy - d / 2), image=img, anchor="nw")
                     color = "white"
                 else:
                     off = day.weekday() >= 5 or self._is_day_off(day)
@@ -1508,7 +1562,12 @@ class App(tk.Tk):
                         dot = RED if day < self.today else ACCENT
                     else:
                         dot = EVENT_DOT
-                    c.create_oval(cx - px(2), cy + px(13), cx + px(2), cy + px(17), fill=dot, outline="")
+                    d, left, top = px(4), round(cx - px(2)), round(cy + px(13))
+                    if day == self.selected:  # 圓點下緣超出選取框，超出的部分底色是白的
+                        img = round_image(c, d, dot, SELECTED, bg_below=(round(cy + px(16)) - top, BG))
+                    else:
+                        img = round_image(c, d, dot, BG)
+                    c.create_image(left, top, image=img, anchor="nw")
 
     def _is_day_off(self, day):
         return any(off for _, off in self.holidays.get(day, []))
@@ -1673,7 +1732,15 @@ class App(tk.Tk):
         """To Do 風格的圓圈：滑鼠移上去顯示 ✓，點擊後填滿並標記完成。"""
         size, mid = px(22), px(22) / 2
         c = tk.Canvas(parent, width=size, height=size, bg=bg, highlightthickness=0, cursor="hand2")
-        c.create_oval(px(2), px(2), size - px(2), size - px(2), outline=GRAY, width=px(2), tags="ring")
+        d = size - px(2)  # 外框外緣直徑，和原本 create_oval 畫出來的大小相同
+        state = {"done": False}
+
+        def ring_image(color):
+            if state["done"]:
+                return round_image(c, d, ACCENT, color)
+            return round_image(c, d, color, color, outline=GRAY, width=px(2))
+        c.create_image((size - d) // 2, (size - d) // 2, image=ring_image(bg), anchor="nw", tags="ring")
+        c.on_bg = lambda color: c.itemconfigure("ring", image=ring_image(color))  # 清單列 hover 換底色時跟著換
         c.bind("<Enter>", lambda e: c.create_text(mid, mid, text="✓", fill=ACCENT, font=SMALL, tags="tick"))
         c.bind("<Leave>", lambda e: c.delete("tick"))
 
@@ -1681,7 +1748,8 @@ class App(tk.Tk):
             c.unbind("<Button-1>")  # 防止連點重複送出
             c.unbind("<Leave>")
             c.delete("tick")
-            c.itemconfigure("ring", fill=ACCENT, outline=ACCENT)
+            state["done"] = True
+            c.itemconfigure("ring", image=ring_image(c.cget("bg")))
             c.create_text(mid, mid, text="✓", fill="white", font=SMALL)
             self.after(250, lambda: self.complete(task))  # 讓使用者看到勾選效果再移除
         c.bind("<Button-1>", done)
