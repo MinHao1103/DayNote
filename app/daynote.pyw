@@ -319,13 +319,15 @@ HOTKEYS = (
     (2, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_D, "Ctrl + Alt + D"),
 )
 HOTKEY_IDS = {hk[0] for hk in HOTKEYS}
+# 快捷鍵對應的動作：F8 叫出快速列（在任何程式中新增／完成），Ctrl + Alt + D 顯示／隱藏主視窗
+HOTKEY_ACTIONS = {1: "quick_bar", 2: "toggle_window"}
 
 
 def win_hook_messages(widget, on_user_minimize=None, on_hotkey=None):
     """攔截視窗訊息，原封不動交給 tkinter 處理，只額外通知：
 
     - SC_MINIMIZE：使用者點工作列（或 Win + ↓）要求縮小；Win + D 不會送這個
-    - WM_HOTKEY：全域快捷鍵（F8、Ctrl + Alt + D）
+    - WM_HOTKEY：全域快捷鍵（F8、Ctrl + Alt + D），回呼收到 HOTKEYS 的 id
     回呼裡不可直接操作 tkinter，請只排入佇列。回傳要保留的 callback 參考；失敗回傳 None。
     """
     try:
@@ -340,7 +342,7 @@ def win_hook_messages(widget, on_user_minimize=None, on_hotkey=None):
             if msg == WM_SYSCOMMAND and (wparam & 0xFFF0) == SC_MINIMIZE and on_user_minimize:
                 on_user_minimize()
             elif msg == WM_HOTKEY and wparam in HOTKEY_IDS and on_hotkey:
-                on_hotkey()
+                on_hotkey(wparam)
             return user32.CallWindowProcW(state["old"], h, msg, wparam, lparam)
 
         callback = _WNDPROC(proc)
@@ -371,11 +373,12 @@ def win_unregister_hotkey(widget, hotkey_id):
 
 
 def hotkey_status_message(failed):
-    """依註冊失敗的快捷鍵名稱，產生狀態列提示；還有能用的就引導改用它。"""
-    usable = [name for _, _, _, name in HOTKEYS if name not in failed]
-    if usable:
-        return f"{'、'.join(failed)} 已被其他程式占用，請改用 {'、'.join(usable)} 叫出 DayNote"
-    return f"{' 和 '.join(failed)} 都已被其他程式占用；隱藏後請再點 StartDayNote 叫回"
+    """依註冊失敗的快捷鍵名稱，產生狀態列提示。兩組功能不同（F8 快速列、Ctrl + Alt + D 主視窗），分開說明。"""
+    if "F8" in failed and "Ctrl + Alt + D" in failed:
+        return "F8 和 Ctrl + Alt + D 都已被其他程式占用；隱藏後請再點 StartDayNote 叫回"
+    if "F8" in failed:
+        return "F8 已被其他程式占用，無法叫出快速列；主視窗仍可用 Ctrl + Alt + D 顯示／隱藏"
+    return "Ctrl + Alt + D 已被其他程式占用；隱藏後請按 F8 叫出快速列，再按 Tab 開啟主視窗"
 
 
 def win_set_background_window(widget):
@@ -960,6 +963,125 @@ def time_text(time_value):
     return f"{time_value:%H:%M}" if time_value else ""
 
 
+# ---------------------------------------------------------------- 快速列：一行文字辨識成待辦
+
+_DAY_CHARS = {c: i for i, c in enumerate(WEEKDAY_NAME)} | {"天": 6}
+_WEEK_WORD = r"(?:週|周|星期|禮拜)"
+_QUICK_DATE_RE = re.compile(
+    r"^(?:(?P<rel>今天|今日|明天|明日|大後天|後天)"
+    r"|(?P<ndays>\d{1,2})天後"
+    r"|(?P<next>下)" + _WEEK_WORD + r"(?P<nextday>[一二三四五六日天])"
+    r"|這?" + _WEEK_WORD + r"(?P<thisday>[一二三四五六日天])"
+    r"|(?P<m1>\d{1,2})/(?P<d1>\d{1,2})"
+    r"|(?P<m2>\d{1,2})月(?P<d2>\d{1,2})[日號]?"
+    r"|(?P<none>無日期|不排日期))")
+_QUICK_TIME_RE = re.compile(
+    r"^(?P<period>上午|早上|中午|下午|晚上|今晚)?"
+    r"(?P<hour>\d{1,2})(?:[:：](?P<colon>\d{2})|點(?:(?P<half>半)|(?P<minute>\d{1,2})分?)?)$")
+_RELATIVE_DAYS = {"今天": 0, "今日": 0, "明天": 1, "明日": 1, "後天": 2, "大後天": 3}
+NO_DATE = "no-date"  # 使用者明確寫了「無日期」
+
+
+def _quick_date(match, today):
+    """把日期片段換算成日期；無效日期（例如 2/30）回傳 None，「無日期」回傳 NO_DATE。"""
+    if match.group("rel"):
+        return today + dt.timedelta(days=_RELATIVE_DAYS[match.group("rel")])
+    if match.group("ndays"):
+        return today + dt.timedelta(days=int(match.group("ndays")))
+    if match.group("nextday"):
+        next_monday = today + dt.timedelta(days=7 - today.weekday())
+        return next_monday + dt.timedelta(days=_DAY_CHARS[match.group("nextday")])
+    if match.group("thisday"):
+        return today + dt.timedelta(days=(_DAY_CHARS[match.group("thisday")] - today.weekday()) % 7)
+    if match.group("none"):
+        return NO_DATE
+    month, day = (match.group("m1"), match.group("d1")) if match.group("m1") else (match.group("m2"), match.group("d2"))
+    for year in (today.year, today.year + 1):  # 今年已經過了就是明年
+        try:
+            candidate = dt.date(year, int(month), int(day))
+        except ValueError:
+            return None
+        if candidate >= today:
+            return candidate
+    return None
+
+
+def _quick_time(text):
+    """時間片段：15:30（24 小時制照寫）、3點、3點半、下午3點15分。
+
+    沒寫上午／下午時，1～6 點當成下午（上班族「3點開會」幾乎都是下午），7～12 點照寫。
+    """
+    match = _QUICK_TIME_RE.match(text)
+    if not match:
+        return None
+    hour = int(match.group("hour"))
+    minute = 30 if match.group("half") else int(match.group("minute") or match.group("colon") or 0)
+    period = match.group("period")
+    if period in ("下午", "晚上", "今晚") and hour < 12:
+        hour += 12
+    elif period == "中午" and hour < 6:
+        hour += 12
+    elif period is None and match.group("colon") is None and 1 <= hour <= 6:
+        hour += 12
+    return dt.time(hour, minute) if hour < 24 and minute < 60 else None
+
+
+def _quick_token(token, today):
+    """單一片段裡的日期與時間（可黏在一起，例如「明天下午3點」）；整段都辨識得出來才算，否則回傳 None。"""
+    date_match = _QUICK_DATE_RE.match(token)
+    due = _quick_date(date_match, today) if date_match else None
+    rest = token[date_match.end():] if date_match and due is not None else token
+    time_value = _quick_time(rest) if rest else None
+    if rest and time_value is None:
+        return None
+    if due is None and time_value is None:
+        return None
+    return due, time_value
+
+
+def parse_quick(text, lists, today, now):
+    """把快速列輸入的一行文字辨識成待辦，以空白分段，辨識不出來的片段留在標題。
+
+    回傳 {"title", "due", "time", "recur", "list"}；list 為 None 時由呼叫端用上次的清單。
+    - 日期：今天、明天、後天、3天後、週五、下週一、10/15、10月15日、無日期
+    - 時間：15:30、3點、3點半、下午3點15分（沒寫上午下午時 1～6 點視為下午）
+    - 重複：每天、平日、每週一三五、每月15日、每月最後一天、每年3/15
+    - 清單：#清單名稱（開頭相符、不分大小寫）
+    只有時間、沒寫日期：時間還沒過就是今天，已經過了就是明天。只有重複規則：從今天起第一個符合的日子。
+    什麼都沒寫：今天。
+    """
+    title, due, due_set, time_value, rule, target = [], None, False, None, None, None
+    for token in text.split():
+        if token.startswith("#") and len(token) > 1 and target is None:
+            name = token[1:].lower()
+            found = next((lst for lst in lists if lst.get("title", "").lower() == name), None) or next(
+                (lst for lst in lists if lst.get("title", "").lower().startswith(name)), None)
+            if found:
+                target = found
+                continue
+        if rule is None and parse_recur(token):
+            rule = parse_recur(token)
+            continue
+        parsed = _quick_token(token, today)
+        if parsed and not (parsed[0] is not None and due_set) and not (parsed[1] and time_value):
+            if parsed[0] is not None:
+                due, due_set = (None if parsed[0] == NO_DATE else parsed[0]), True
+            if parsed[1]:
+                time_value = parsed[1]
+            continue
+        title.append(token)
+    if not due_set:
+        if rule:
+            due = next_due(rule, today - dt.timedelta(days=1), today)
+        elif time_value and dt.datetime.combine(today, time_value) <= now:
+            due = today + dt.timedelta(days=1)
+        else:
+            due = today
+    if due is None:  # 沒有日期就不能提醒，也不能重複
+        time_value, rule = None, None
+    return {"title": " ".join(title), "due": due, "time": time_value, "recur": rule, "list": target}
+
+
 def _notes_preview(notes, limit=24):
     """詳細資訊的單行預覽：取第一個非空白行，過長時截斷。"""
     line = next((ln.strip() for ln in notes.splitlines() if ln.strip()), "")
@@ -1420,6 +1542,232 @@ class ReminderToast:
         ReminderToast.relayout()
 
 
+class QuickBar:
+    """快速列（F8）：螢幕中央的一條輸入列，不用打開主視窗就能新增、完成、搜尋待辦。
+
+    - 空白時：列出逾期與今天的待辦，↑↓ 選擇、Space 完成、Enter 開啟詳細頁
+    - 打字時：即時辨識日期、時間、重複、#清單（parse_quick），Enter 新增
+    - 以 / 開頭：搜尋所有未完成的待辦
+    - Tab 開啟主視窗；Esc 或點到其他地方就關閉
+    """
+
+    WIDTH = 520
+    MAX_ROWS = 8
+    EXAMPLE = "例如：明天下午3點 跟客戶開會 每週二 #工作　·　/ 開頭可搜尋"
+    KEYS = "Enter 新增或開啟 · ↑↓ 選擇 · Space 完成 · Tab 主視窗 · Esc 關閉"
+
+    def __init__(self, app):
+        self.app = app
+        self.items, self.selected, self.parsed, self.busy = [], 0, None, False
+        win = self.win = tk.Toplevel(app)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        body = tk.Frame(win, bg=BG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+
+        row = tk.Frame(body, bg=BG)
+        row.pack(fill="x")
+        tk.Label(row, text="＋", bg=BG, fg=ACCENT, font=("Microsoft JhengHei UI", 15)).pack(side="left")
+        self.text = tk.StringVar(win)
+        self.entry = tk.Entry(row, textvariable=self.text, font=("Microsoft JhengHei UI", 14), relief="flat",
+                              bg=BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0)
+        self.entry.pack(side="left", fill="x", expand=True, padx=(px(8), 0), ipady=px(4))
+        self.chips = tk.Label(body, bg=BG, font=FONT, anchor="w", justify="left")
+        self.chips.pack(fill="x", pady=(px(4), 0))
+        tk.Frame(body, bg=DIVIDER, height=1).pack(fill="x", pady=px(8))
+        self.header = tk.Label(body, bg=BG, fg=GRAY, font=SMALL, anchor="w")
+        self.header.pack(fill="x")
+        self.rows = tk.Frame(body, bg=BG)
+        self.rows.pack(fill="x")
+        self.status = tk.Label(body, bg=BG, fg=GRAY, font=SMALL, anchor="w", justify="left")
+        self.status.pack(fill="x", pady=(px(4), 0))
+        tk.Label(body, text=self.KEYS, bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(px(4), 0))
+
+        self.text.trace_add("write", lambda *_: self._on_change())
+        self.entry.bind("<Return>", lambda e: self.submit())
+        self.entry.bind("<Escape>", lambda e: self.close())
+        self.entry.bind("<Tab>", lambda e: (self.open_main(), "break")[1])  # 不讓 Tab 移動焦點
+        self.entry.bind("<Up>", lambda e: (self.move(-1), "break")[1])
+        self.entry.bind("<Down>", lambda e: (self.move(1), "break")[1])
+        self.entry.bind("<space>", self._on_space)
+        # 焦點離開整個快速列才關閉（只在列內元件間移動不算）
+        win.bind("<FocusOut>", lambda e: win.after_idle(self._close_if_unfocused))
+
+        self.render()
+        self._place()
+        win.lift()
+        win.focus_force()
+        self.entry.focus_force()
+
+    # ---- 視窗
+    def is_open(self):
+        try:
+            return bool(self.win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def close(self):
+        if self.is_open():
+            self.win.destroy()
+
+    def _close_if_unfocused(self):
+        if not self.is_open():
+            return
+        try:
+            focus = self.win.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        if focus is None or not str(focus).startswith(str(self.win)):
+            self.close()
+
+    def _place(self):
+        """放在主螢幕可用範圍的水平中央、上方約四分之一處（比照 Spotlight）。"""
+        self.win.update_idletasks()
+        area = win_work_area() or (0, 0, self.win.winfo_screenwidth(), self.win.winfo_screenheight())
+        self.x = area[0] + (area[2] - area[0] - px(self.WIDTH)) // 2
+        self.y = area[1] + (area[3] - area[1]) // 4
+        self._resize()
+
+    def _resize(self):
+        self.win.update_idletasks()
+        if hasattr(self, "x"):
+            self.win.geometry(f"{px(self.WIDTH)}x{self.win.winfo_reqheight()}+{self.x}+{self.y}")
+
+    # ---- 內容
+    def mode(self):
+        text = self.text.get()
+        if not text.strip():
+            return "agenda"
+        return "search" if text.lstrip().startswith("/") else "add"
+
+    def _on_change(self):
+        self.selected = 0
+        self.status.config(text="", fg=GRAY)
+        self.render()
+
+    def render(self):
+        app, mode = self.app, self.mode()
+        today = dt.date.today()
+        if mode == "add":
+            self.parsed = parse_quick(self.text.get(), app.lists, today, dt.datetime.now())
+            self.chips.config(text=self._chips_text(self.parsed), fg=ACCENT)
+            self.items = []
+            self.header.config(text="按 Enter 新增" if self.parsed["title"] else "還沒有標題，請輸入工作內容")
+        else:
+            self.parsed = None
+            self.chips.config(text=self.EXAMPLE, fg=GRAY)
+            if not app.g.refresh_token:
+                self.items = []
+                self.header.config(text="尚未登入 Google：按 Tab 開啟主視窗登入")
+            elif mode == "search":
+                query = self.text.get().lstrip()[1:].strip().lower()
+                found = [t for t in app.tasks if query and query in t["title"].lower()]
+                self.items = sorted(found, key=lambda t: (t["due"] is None, t["due"] or today, app._order_key(t)))
+                self.header.config(text=f"找到 {len(self.items)} 件" if query else "輸入要找的文字")
+            else:
+                self.items = app.today_agenda()
+                self.header.config(text=f"今天還有 {len(self.items)} 件" if self.items else "今天的待辦都完成了")
+        self.items = self.items[:self.MAX_ROWS]
+        self.selected = min(self.selected, max(len(self.items) - 1, 0))
+        self._render_rows(today)
+        self._resize()
+
+    def _chips_text(self, parsed):
+        lst = parsed["list"] or self.app.current_list()
+        parts = [f"📅 {date_text(parsed['due'])}"]
+        if parsed["time"]:
+            parts.append(f"⏰ {time_text(parsed['time'])}")
+        if parsed["recur"]:
+            parts.append(f"🔁 {format_recur(parsed['recur'])}")
+        if lst:
+            parts.append(f"📁 {lst.get('title', '')}")
+        return "　".join(parts)
+
+    def _render_rows(self, today):
+        for w in self.rows.winfo_children():
+            w.destroy()
+        if not self.items:
+            self.rows.config(height=1)  # Tk 的 Frame 清空後會維持原本高度，要明確縮回去
+        for i, task in enumerate(self.items):
+            bg = SELECTED if i == self.selected else BG
+            row = tk.Frame(self.rows, bg=bg, padx=px(6), pady=px(3), cursor="hand2")
+            row.pack(fill="x")
+            circle = tk.Label(row, text="○", bg=bg, fg=GRAY, font=FONT, cursor="hand2")
+            circle.pack(side="left")
+            circle.bind("<Button-1>", lambda e, t=task: self.complete(t))
+            title = tk.Label(row, text=task["title"], bg=bg, fg=TEXT, font=FONT, anchor="w")
+            title.pack(side="left", fill="x", expand=True, padx=(px(6), 0))
+            when, color = self._when(task, today)
+            tk.Label(row, text=when, bg=bg, fg=color, font=SMALL).pack(side="right")
+            for widget in (row, title):
+                widget.bind("<Button-1>", lambda e, t=task: self.open_main(t))
+
+    @staticmethod
+    def _when(task, today):
+        due, at = task["due"], time_text(task.get("time"))
+        if due is not None and due < today:
+            return f"已逾期 {due.month}/{due.day}", RED
+        if due == today:
+            return at, ACCENT
+        return (f"{date_text(due, short=True)} {at}".strip(), GRAY)
+
+    # ---- 操作
+    def move(self, delta):
+        if self.items:
+            self.selected = (self.selected + delta) % len(self.items)
+            self._render_rows(dt.date.today())
+
+    def _on_space(self, _):
+        if self.text.get():
+            return None  # 輸入中：照常打空白
+        if self.items:
+            self.complete(self.items[self.selected])
+        return "break"
+
+    def submit(self):
+        if self.mode() == "add":
+            self.add()
+        elif self.items:
+            self.open_main(self.items[self.selected])
+
+    def add(self):
+        if self.busy:
+            return
+        parsed = self.parsed
+        if not parsed["title"]:
+            self.status.config(text="請輸入工作內容（目前只有日期或時間）", fg=RED)
+            return
+        lst = parsed["list"] or self.app.current_list()
+        if lst is None:
+            self.status.config(text="請先登入 Google：按 Tab 開啟主視窗登入", fg=RED)
+            return
+        self.busy = True
+        self.status.config(text="新增中…", fg=GRAY)
+
+        def done(task, err):
+            self.busy = False
+            if err:
+                if self.is_open():  # 快速列還開著就在這裡顯示，主視窗可能是隱藏的
+                    self.status.config(text=str(err), fg=RED)
+                else:
+                    self.app._show_error(err)
+                return
+            self.app.redraw()
+            self.app._set_status(f"已新增「{task['title']}」到「{lst.get('title', '')}」")
+            self.close()
+        self.app._create_task(parsed["title"], parsed["due"], parsed["time"], parsed["recur"], lst, done)
+
+    def complete(self, task):
+        self.app.complete(task)
+        self.render()
+        self.status.config(text=f"已完成「{task['title']}」（可在主視窗按「復原」）", fg=GRAY)
+
+    def open_main(self, task=None):
+        self.close()
+        self.app.show_main(task)
+
+
 def ask_text(parent, title, prompt, ok_text="建立"):
     """中文按鈕的單行輸入框（tkinter 內建 simpledialog 的按鈕固定是英文）。取消回傳 None。"""
     win = tk.Toplevel(parent)
@@ -1590,7 +1938,7 @@ class App(tk.Tk):
             return
         self._message_hook = win_hook_messages(
             self, on_user_minimize=self._mark_user_minimize,
-            on_hotkey=lambda: self.q.put((lambda *_: self.toggle_visible(), None, None)))
+            on_hotkey=lambda hotkey_id: self.q.put((lambda *_: self.on_hotkey(hotkey_id), None, None)))
         if self._message_hook:
             self._register_hotkey(retries=6)
 
@@ -1607,8 +1955,15 @@ class App(tk.Tk):
         else:
             self._set_status(hotkey_status_message(failed), error=True)
 
+    def on_hotkey(self, hotkey_id):
+        """全域快捷鍵：依 HOTKEY_ACTIONS 叫出快速列，或顯示／隱藏主視窗。"""
+        if HOTKEY_ACTIONS.get(hotkey_id) == "quick_bar":
+            self.toggle_quick_bar()
+        else:
+            self.toggle_visible()
+
     def toggle_visible(self):
-        """F8 或 Ctrl + Alt + D：隱藏中就叫回來並放到最前面，顯示中就隱藏。"""
+        """Ctrl + Alt + D：隱藏中就叫回來並放到最前面，顯示中就隱藏。"""
         if self.state() == "withdrawn":
             self.deiconify()
             self.lift()
@@ -1676,7 +2031,7 @@ class App(tk.Tk):
 
     def minimize(self):
         if not self.show_in_taskbar:
-            self.withdraw()  # 背景模式：隱藏視窗，程式與提醒照常執行；F8 或 Ctrl + Alt + D 叫回
+            self.withdraw()  # 背景模式：隱藏視窗，程式與提醒照常執行；Ctrl + Alt + D（或 F8 快速列按 Tab）叫回
             return
         if self.borderless:
             self._mark_user_minimize()  # 自己按「—」縮小，不是 Win + D
@@ -1762,7 +2117,7 @@ class App(tk.Tk):
         self._paint_pin()
         self.btn_min = self._icon_button(
             tools, "—", self.minimize,
-            tip=lambda: "縮小到工作列" if self.show_in_taskbar else "隱藏到背景（F8 叫回）")
+            tip=lambda: "縮小到工作列" if self.show_in_taskbar else "隱藏到背景（Ctrl + Alt + D 叫回，或按 F8 後按 Tab）")
         btn_close = self._icon_button(tools, "✕", self.close, tip="關閉")
         if self.borderless:
             self.btn_min.pack(side="left")
@@ -2869,23 +3224,71 @@ class App(tk.Tk):
         self.entry.delete(0, "end")
         self._set_status("新增中…")
 
-        def done(created, err):
+        def done(task, err):
             if err:
                 self._hide_placeholder()
                 self.entry.insert(0, title)
                 self._show_error(err)
                 return
-            self.tasks.append({"id": created["id"], "title": created.get("title") or title,
-                               "list_id": lst["id"], "list_title": lst.get("title", ""),
-                               "due": task_due(created), "parent": None, "notes": "", "time": time_value,
-                               "recur": None,
-                               "position": created.get("position", "")})
             self.new_time = None  # 時間只套用在這一筆
             when = f"，{time_text(time_value)} 提醒" if time_value else ""
             self._set_status(f"已新增到「{lst.get('title', '')}」{when}")
             self.redraw()
-        notes = join_meta(time_value, None, "")
+        self._create_task(title, due, time_value, None, lst, done)
+
+    def _create_task(self, title, due, time_value, rule, lst, on_done):
+        """（底部輸入列與快速列共用）在 Google 建立待辦並加入畫面；完成後呼叫 on_done(畫面上的任務, 錯誤)。"""
+        def done(created, err):
+            if err:
+                on_done(None, err)
+                return
+            task = {"id": created["id"], "title": created.get("title") or title,
+                    "list_id": lst["id"], "list_title": lst.get("title", ""),
+                    "due": task_due(created), "parent": None, "notes": "", "time": time_value,
+                    "recur": rule, "position": created.get("position", "")}
+            self.tasks.append(task)
+            on_done(task, None)
+        notes = join_meta(time_value, rule, "")
         self.run_bg(lambda: self.g.add_task(lst["id"], title, due, notes=notes or None), done)
+
+    # ---- 快速列（F8）
+
+    def toggle_quick_bar(self):
+        """F8：在任何程式中叫出快速列；已開著就關閉。"""
+        bar = getattr(self, "quick_bar", None)
+        if bar and bar.is_open():
+            bar.close()
+        else:
+            self.quick_bar = QuickBar(self)
+
+    def current_list(self):
+        """快速列沒有指定 #清單 時使用的清單：主畫面下拉選單目前選的（也就是上次用的）。"""
+        index = self.cmb_list.current()
+        if 0 <= index < len(self.lists):
+            return self.lists[index]
+        return self.lists[0] if self.lists else None
+
+    def today_agenda(self):
+        """快速列空白時列出的待辦：逾期＋今天的最上層任務，排序與主畫面相同（有時間的在前）。"""
+        today = dt.date.today()
+        top = self._top_level()
+        overdue = sorted((t for t in top if t["due"] and t["due"] < today),
+                         key=lambda t: (t["due"], self._order_key(t)))
+        todays = sorted((t for t in top if t["due"] == today),
+                        key=lambda t: (t.get("time") is None, t.get("time") or dt.time(), self._order_key(t)))
+        return overdue + todays
+
+    def show_main(self, task=None):
+        """從快速列開啟主視窗；有指定任務就直接開它的詳細頁。"""
+        if self.state() == "withdrawn":
+            self.toggle_visible()
+        else:
+            self.lift()
+            self.focus_force()
+        if task is not None and task in self.tasks:
+            if task["due"] and task["due"] != self.selected:
+                self.select(task["due"])
+            self.open_detail(task)
 
     # ---- 執行緒
 

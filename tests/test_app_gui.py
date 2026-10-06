@@ -299,12 +299,16 @@ class AppTestCase(unittest.TestCase):
 
     def start(self, **kw):
         """啟動 App 並等第一次同步完成。"""
-        self.app = daynote.App(self.g, holiday_calendar=kw.pop("holiday_calendar", HOLIDAY_CAL),
-                               desktop_reminder=False, **kw)
+        hook = {}
+        with unittest.mock.patch.object(daynote, "win_hook_messages",
+                                        lambda w, **k: hook.update(k) or object()):
+            self.app = daynote.App(self.g, holiday_calendar=kw.pop("holiday_calendar", HOLIDAY_CAL),
+                                   desktop_reminder=False, **kw)
+            pump(self.app, 0.4)  # 背景模式的視窗樣式與快捷鍵在 200ms 後才設定
+        self.hotkey_callback = hook.get("on_hotkey")  # Windows 收到 WM_HOTKEY 時會呼叫的函式
         self.app.clipboard_clear = lambda: None   # 不動使用者的剪貼簿
         self.app.clipboard_append = lambda text: setattr(self, "clipboard", text)
         self.addCleanup(self._destroy)
-        pump(self.app, 0.4)  # 背景模式的視窗樣式與快捷鍵在 200ms 後才設定
         if self.g.refresh_token:
             settle(self.app)
         return self.app
@@ -1084,9 +1088,9 @@ class WindowTest(AppTestCase):
         app.update()
         # Then: 隱藏
         self.assertEqual(app.state(), "withdrawn")
-        # When: 快捷鍵（F8／Ctrl + Alt + D 觸發的同一個動作）
-        app.toggle_visible()
-        app.update()
+        # When: Ctrl + Alt + D（Windows 送來 id 2）
+        self.hotkey_callback(2)
+        pump(app, 0.3)
         # Then: 顯示
         self.assertEqual(app.state(), "normal")
 
@@ -1101,6 +1105,258 @@ class WindowTest(AppTestCase):
         self.assertTrue(app.attributes("-topmost"))
         app.close()
         self.assertTrue(daynote.load_state()["topmost"])
+
+
+# ---------------------------------------------------------------- 快速列（F8）
+
+class QuickBarTest(AppTestCase):
+
+    def open_bar(self):
+        """按 F8（Windows 送來 id 1）叫出快速列。"""
+        self.hotkey_callback(1)
+        pump(self.app, 0.3)
+        bar = self.app.quick_bar
+        self.assertTrue(bar.is_open())
+        return bar
+
+    def type_in(self, bar, text):
+        bar.entry.focus_force()
+        self.app.update()
+        bar.text.set(text)
+        self.app.update()
+
+    def test_f8_opens_bar_with_agenda(self):
+        """按 F8 > 快速列出現、游標在輸入列，列出逾期與今天的待辦和輸入範例"""
+        # Given: 逾期一筆、今天兩筆、明天一筆
+        self.g.seed("回信", self.today - dt.timedelta(days=1))
+        self.g.seed("晨會", self.today, notes="⏰ 09:00")
+        self.g.seed("寫週報", self.today)
+        self.g.seed("明天的事", self.today + dt.timedelta(days=1))
+        self.start()
+        # When: F8
+        bar = self.open_bar()
+        # Then: 逾期在前、今天依時間，明天的不列
+        shown = texts(bar.win)
+        self.assertIs(self.app.focus_get(), bar.entry)
+        self.assertIn("今天還有 3 件", shown)
+        self.assertEqual([t["title"] for t in bar.items], ["回信", "晨會", "寫週報"])
+        self.assertIn(daynote.QuickBar.EXAMPLE, shown)
+
+    def test_f8_again_closes(self):
+        """快速列開著再按 F8 > 關閉"""
+        # Given: 快速列開著
+        self.start()
+        bar = self.open_bar()
+        # When: 再按 F8
+        self.hotkey_callback(1)
+        pump(self.app, 0.3)
+        # Then: 關閉
+        self.assertFalse(bar.is_open())
+
+    def test_typing_shows_chips(self):
+        """輸入一行文字 > 即時顯示辨識出的日期、時間、重複、清單"""
+        # Given: 快速列
+        self.start()
+        bar = self.open_bar()
+        # When: 打字
+        self.type_in(bar, "明天下午3點 跟客戶開會 每週二 #個人")
+        # Then: 標籤
+        self.assertEqual(bar.chips.cget("text"), "📅 明天　⏰ 15:00　🔁 每週二　📁 個人")
+        self.assertIn("按 Enter 新增", texts(bar.win))
+
+    def test_bar_shrinks_when_typing(self):
+        """清單模式切到輸入模式 > 視窗高度跟著縮小，不留下空白"""
+        # Given: 列出三筆待辦的快速列
+        for title in ("晨會", "寫週報", "回信"):
+            self.g.seed(title, self.today)
+        self.start()
+        bar = self.open_bar()
+        agenda_height = bar.win.winfo_height()
+        # When: 開始打字
+        self.type_in(bar, "買牛奶")
+        # Then: 變矮
+        self.assertLess(bar.win.winfo_height(), agenda_height)
+
+    def test_enter_adds_and_closes(self):
+        """按 Enter > 依辨識結果建立待辦，快速列關閉，主視窗狀態列顯示已新增"""
+        # Given: 輸入完整的一行
+        app = self.start()
+        bar = self.open_bar()
+        self.type_in(bar, "明天下午3點 跟客戶開會 每週二 #個人")
+        # When: Enter
+        key(bar.entry, "<Return>")
+        settle(app)
+        # Then: Google 上的待辦欄位正確
+        (raw,) = self.g.by_title("跟客戶開會")
+        self.assertEqual(raw["due"][:10], (self.today + dt.timedelta(days=1)).isoformat())
+        self.assertEqual(raw["notes"], "⏰ 15:00\n🔁 每週二")
+        self.assertEqual(raw["list_id"], "L2")
+        self.assertFalse(bar.is_open())
+        self.assertEqual(self.status(), "已新增「跟客戶開會」到「個人」")
+
+    def test_default_list_is_current(self):
+        """沒寫 #清單 > 用主畫面目前選的清單"""
+        # Given: 主畫面選了「個人」
+        app = self.start()
+        app.cmb_list.current(1)
+        bar = self.open_bar()
+        self.type_in(bar, "買牛奶")
+        # When: Enter
+        key(bar.entry, "<Return>")
+        settle(app)
+        # Then: 放進個人、今天
+        (raw,) = self.g.by_title("買牛奶")
+        self.assertEqual((raw["list_id"], raw["due"][:10]), ("L2", self.today.isoformat()))
+
+    def test_empty_title_refused(self):
+        """只寫日期時間沒有標題 > 紅字提示，不建立"""
+        # Given: 只有日期時間
+        app = self.start()
+        bar = self.open_bar()
+        self.type_in(bar, "明天 3點")
+        # When: Enter
+        key(bar.entry, "<Return>")
+        pump(app, 0.2)
+        # Then: 不建立
+        self.assertNotIn("add_task", self.g.calls)
+        self.assertEqual(bar.status.cget("text"), "請輸入工作內容（目前只有日期或時間）")
+        self.assertEqual(bar.status.cget("fg"), daynote.RED)
+
+    def test_add_failure_keeps_bar_open(self):
+        """新增失敗 > 快速列不關，紅字顯示錯誤（主視窗可能是隱藏的）"""
+        # Given: 新增會失敗
+        app = self.start()
+        self.g.fail.add("add_task")
+        bar = self.open_bar()
+        self.type_in(bar, "買牛奶")
+        # When: Enter
+        key(bar.entry, "<Return>")
+        settle(app)
+        # Then: 還開著、紅字
+        self.assertTrue(bar.is_open())
+        self.assertEqual(bar.status.cget("text"), "add_task failed")
+        self.assertEqual(bar.text.get(), "買牛奶")
+
+    def test_arrow_and_space_complete(self):
+        """↓ 選第二筆再按 Space > 完成那一筆，清單更新"""
+        # Given: 今天兩筆
+        first = self.g.seed("晨會", self.today, notes="⏰ 09:00")
+        second = self.g.seed("寫週報", self.today)
+        app = self.start()
+        bar = self.open_bar()
+        # When: ↓、Space
+        key(bar.entry, "<Down>")
+        key(bar.entry, "<space>")
+        settle(app)
+        # Then: 只完成第二筆
+        self.assertEqual(self.g.tasks[second]["status"], "completed")
+        self.assertEqual(self.g.tasks[first]["status"], "needsAction")
+        self.assertEqual([t["title"] for t in bar.items], ["晨會"])
+        self.assertEqual(bar.text.get(), "")
+
+    def test_space_while_typing_is_text(self):
+        """輸入中按 Space > 照常打空白，不會完成任何待辦"""
+        # Given: 今天一筆，輸入列已有文字
+        self.g.seed("晨會", self.today)
+        app = self.start()
+        bar = self.open_bar()
+        self.type_in(bar, "買")
+        bar.entry.icursor("end")
+        # When: Space
+        key(bar.entry, "<space>")
+        pump(app, 0.2)
+        # Then: 是空白
+        self.assertEqual(bar.text.get(), "買 ")
+        self.assertNotIn("complete_task", self.g.calls)
+
+    def test_search_and_open_detail(self):
+        """輸入 /週報 > 找出所有含「週報」的待辦；Enter > 主視窗開啟它的詳細頁"""
+        # Given: 不同日期的待辦，主視窗隱藏中
+        self.g.seed("寫週報", self.today + dt.timedelta(days=2))
+        self.g.seed("交週報給主管", None)
+        self.g.seed("晨會", self.today)
+        app = self.start()
+        app.minimize()
+        app.update()
+        bar = self.open_bar()
+        # When: 搜尋
+        self.type_in(bar, "/週報")
+        # Then: 兩筆，有日期的在前
+        self.assertIn("找到 2 件", texts(bar.win))
+        self.assertEqual([t["title"] for t in bar.items], ["寫週報", "交週報給主管"])
+        # When: Enter
+        key(bar.entry, "<Return>")
+        pump(app, 0.3)
+        # Then: 主視窗出現並開啟詳細頁
+        self.assertFalse(bar.is_open())
+        self.assertEqual(app.state(), "normal")
+        self.assertEqual(app.detail["task"]["title"], "寫週報")
+
+    def test_esc_closes(self):
+        """按 Esc > 快速列關閉"""
+        # Given: 快速列
+        self.start()
+        bar = self.open_bar()
+        # When: Esc
+        key(bar.entry, "<Escape>")
+        # Then: 關閉
+        self.assertFalse(bar.is_open())
+
+    def test_hidden_window_f8_then_tab(self):
+        """主視窗隱藏時按 F8 > 快速列照樣出現；按 Tab > 主視窗回來、快速列關閉"""
+        # Given: 主視窗已隱藏（實際使用情境：在瀏覽器裡按 F8）
+        app = self.start()
+        click(app.btn_min)
+        self.assertEqual(app.state(), "withdrawn")
+        # When: F8
+        bar = self.open_bar()
+        # Then: 快速列可見且有焦點
+        self.assertTrue(bar.win.winfo_ismapped())
+        self.assertIs(app.focus_get(), bar.entry)
+        # When: Tab
+        key(bar.entry, "<Tab>")
+        pump(app, 0.3)
+        # Then: 主視窗顯示
+        self.assertFalse(bar.is_open())
+        self.assertEqual(app.state(), "normal")
+
+    def test_ctrl_alt_d_still_toggles_window(self):
+        """按 Ctrl + Alt + D > 仍是顯示／隱藏主視窗，不開快速列"""
+        # Given: 主視窗顯示中
+        app = self.start()
+        # When: Ctrl + Alt + D
+        self.hotkey_callback(2)
+        pump(app, 0.3)
+        # Then: 隱藏、沒有快速列
+        self.assertEqual(app.state(), "withdrawn")
+        self.assertIsNone(getattr(app, "quick_bar", None))
+
+    def test_focus_leaving_closes(self):
+        """點到快速列以外（焦點離開） > 自動關閉"""
+        # Given: 快速列
+        app = self.start()
+        bar = self.open_bar()
+        # When: 焦點移到主視窗的輸入框
+        app.entry.focus_force()
+        pump(app, 0.3)
+        # Then: 關閉
+        self.assertFalse(bar.is_open())
+
+    def test_logged_out(self):
+        """未登入按 F8 > 提示按 Tab 登入；輸入後 Enter > 紅字提示，不呼叫 Google"""
+        # Given: 未登入
+        self.g = StoreGoogle(logged_in=False)
+        app = self.start()
+        bar = self.open_bar()
+        # Then: 登入提示
+        self.assertIn("尚未登入 Google：按 Tab 開啟主視窗登入", texts(bar.win))
+        # When: 輸入並 Enter
+        self.type_in(bar, "買牛奶")
+        key(bar.entry, "<Return>")
+        pump(app, 0.2)
+        # Then: 擋下
+        self.assertEqual(bar.status.cget("text"), "請先登入 Google：按 Tab 開啟主視窗登入")
+        self.assertNotIn("add_task", self.g.calls)
 
 
 if __name__ == "__main__":
