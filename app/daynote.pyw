@@ -1254,31 +1254,21 @@ class DatePicker(_Popup):
 
 
 class TimePicker(_Popup):
-    """提醒時間選擇器：常用時間＋自訂（HH:MM，Enter 確認）＋不設時間。"""
-
-    PRESETS = ("09:00", "12:00", "15:00", "18:00", "20:00")
+    """提醒時間選擇器：自訂（HH:MM，Enter 確認）＋不設時間。不提供預設時間（使用者要求）。"""
 
     def __init__(self, app, anchor, current, on_pick):
         self.on_pick = on_pick
         self.current = current
         super().__init__(app, anchor)
+        self.custom.focus_set()  # 打開就能直接輸入時間
 
     def _render(self):
         for w in self.body.winfo_children():
             w.destroy()
         tk.Label(self.body, text="提醒時間（選填）", bg=CARD_BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
-        grid = tk.Frame(self.body, bg=CARD_BG)
-        grid.pack(fill="x", pady=px(4))
-        for i, text in enumerate(self.PRESETS):
-            value = parse_time_text(text)
-            selected = value == self.current
-            lbl = tk.Label(grid, text=text, bg=ACCENT if selected else CARD_BG, fg="white" if selected else TEXT,
-                           font=FONT, cursor="hand2", padx=px(6), pady=px(2))
-            lbl.grid(row=i // 3, column=i % 3, padx=px(2), pady=px(2), sticky="ew")
-            lbl.bind("<Button-1>", lambda e, v=value: self.pick(v))
         row = tk.Frame(self.body, bg=CARD_BG)
-        row.pack(fill="x", pady=(px(2), px(4)))
-        tk.Label(row, text="自訂", bg=CARD_BG, fg=GRAY, font=SMALL).pack(side="left")
+        row.pack(fill="x", pady=(px(6), px(4)))
+        tk.Label(row, text="時間", bg=CARD_BG, fg=GRAY, font=SMALL).pack(side="left")
         self.custom = tk.Entry(row, width=6, font=FONT, relief="flat", bg=BG, fg=TEXT, insertbackground=TEXT,
                                highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
         self.custom.insert(0, time_text(self.current) or "")
@@ -1292,7 +1282,7 @@ class TimePicker(_Popup):
     def _pick_custom(self):
         value = parse_time_text(self.custom.get())
         if value is None:
-            self.hint.config(text="請輸入 HH:MM，例如 15:30")
+            self.hint.config(text="請輸入時間，例如 15:30 或 1530")
             return
         self.pick(value)
 
@@ -1752,7 +1742,7 @@ class App(tk.Tk):
         top.pack(fill="x", padx=(px(12), px(4)), pady=(px(6), 0))
         # 右側按鈕群先 pack，空間不足時被壓縮的是日期標題，而不是按鈕
         tools = tk.Frame(top, bg=BG)
-        tools.pack(side="right", anchor="n")  # 按鈕固定在右上角
+        tools.pack(side="right", anchor="n", pady=(px(8), 0))  # 按鈕固定在右上角，離視窗上緣留一點距離
         self.btn_login = tk.Label(tools, text="登入", bg=ACCENT, fg="white", font=FONT,
                                   padx=px(8), cursor="hand2")
         self.btn_login.bind("<Button-1>", lambda e: self.login())
@@ -1823,7 +1813,10 @@ class App(tk.Tk):
         bottom = tk.Frame(self.main_view, bg=CARD_BG, padx=px(8), pady=px(6),
                           highlightthickness=1, highlightbackground=BORDER)
         bottom.pack(side="bottom", fill="x", padx=px(12), pady=px(4))
-        tk.Label(bottom, text="＋", bg=CARD_BG, fg=ACCENT, font=FONT).pack(side="left")
+        self.btn_add = tk.Label(bottom, text="＋", bg=CARD_BG, fg=ACCENT, font=FONT, cursor="hand2")
+        self.btn_add.pack(side="left")
+        self.btn_add.bind("<Button-1>", lambda e: self._on_add_click())
+        Tooltip(self.btn_add, "新增工作（也可以按 Enter）")
         self.entry = tk.Entry(bottom, font=FONT, relief="flat", bg=CARD_BG, fg=TEXT,
                               insertbackground=TEXT, highlightthickness=0)
         self.entry.pack(side="left", fill="x", expand=True, padx=px(4))
@@ -2122,7 +2115,14 @@ class App(tk.Tk):
         return c
 
     def _placeholder_text(self):
-        return "新增工作"
+        return "新增工作（Enter）"
+
+    def _on_add_click(self):
+        """點「＋」：有輸入文字就新增；還沒輸入就把游標移到輸入框。"""
+        if self.placeholder_on or not self.entry.get().strip():
+            self.entry.focus_force()
+            return
+        self.add_task()
 
     def _set_new_due(self, day):
         self.new_due = day
