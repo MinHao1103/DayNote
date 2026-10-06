@@ -5,7 +5,7 @@
 產出：dist/DayNote.zip
 
 壓縮包內容（檔案直接放在最上層，Windows「解壓縮全部」會產生單層的 DayNote 資料夾）：
-      StartDayNote.bat, SetupAutostart.bat, README.md
+      StartDayNote.bat, StartDayNoteSilent.vbs, SetupAutostart.bat, README.md
       app/                 程式
       data/                只有 config.example.json（個人資料一律不放）
       docs/                README 截圖
@@ -21,7 +21,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # DayNote 資料夾
 DIST = os.path.join(ROOT, "dist")
-APP_FILES = ("StartDayNote.bat", "SetupAutostart.bat", "README.md", os.path.join("data", "config.example.json"))
+APP_FILES = ("StartDayNote.bat", "StartDayNoteSilent.vbs", "SetupAutostart.bat", "README.md", os.path.join("data", "config.example.json"))
 APP_DIRS = ("app", "docs")
 PERSONAL_FILES = ("config.json", "token.bin", "state.json", "daynote.pid")  # data 資料夾內，一律不打包
 

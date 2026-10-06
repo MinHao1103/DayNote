@@ -187,6 +187,8 @@ Google 預設 7 天後會要你重新登入。想要一直保持登入：
 
 **打開 DayNote**：到 `DayNote` 資料夾，點兩下 `StartDayNote`。
 
+> 點 `StartDayNote` 時會先閃一下黑色視窗，這是正常的。不想看到它，可以改點兩下 `StartDayNoteSilent`，效果一樣。
+
 | 想做什麼 | 怎麼做 |
 |---|---|
 | 新增待辦 | 在最下面的「新增工作」輸入文字，按 Enter |
@@ -231,7 +233,7 @@ Google 預設 7 天後會要你重新登入。想要一直保持登入：
 
 ### 打不開 DayNote
 
-公司電腦有時會擋住 `StartDayNote`，可以改用下面的方法：
+公司電腦有時會擋住 `StartDayNote` 或 `StartDayNoteSilent`。先試另一個；兩個都打不開，可以改用下面的方法：
 
 1. 打開 `DayNote` 資料夾
 2. 點檔案總管最上面的**網址列**（顯示資料夾路徑的地方），輸入 `cmd`，按 Enter

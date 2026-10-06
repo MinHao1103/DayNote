@@ -1,2 +1,4 @@
 # Windows 批次檔固定 CRLF，避免從 Git 取出後換行格式錯誤
 *.bat text eol=crlf
+# VBScript 同樣固定 CRLF；內容須維持純 ASCII（wscript 不吃 UTF-8）
+*.vbs text eol=crlf
