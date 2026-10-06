@@ -536,6 +536,16 @@ class AddTaskTest(AppTestCase):
         self.assertIn("不設時間", shown)
         self.assertIsInstance(app.focus_get(), tk.Entry)
 
+    def test_time_picker_shows_input_hint(self):
+        """打開時間選擇器 > 不用先輸入錯誤，就以灰字顯示輸入範例"""
+        # Given: 已登入
+        app = self.start()
+        # When: 打開時間選擇器
+        click(app.btn_new_time)
+        # Then: 灰字範例
+        hint = find_label(popup(app), "例如 15:30 或 1530，按 Enter 確定")
+        self.assertEqual(hint.cget("fg"), daynote.GRAY)
+
     def test_time_picker_invalid_input(self):
         """時間欄位輸入看不懂的內容 > 顯示格式提示，不套用"""
         # Given: 時間選擇器
@@ -543,8 +553,9 @@ class AddTaskTest(AppTestCase):
         click(app.btn_new_time)
         # When: 輸入無效時間
         type_time(app, "25:00")
-        # Then: 提示，仍未設定時間
-        self.assertIn("請輸入時間，例如 15:30 或 1530", texts(popup(app)))
+        # Then: 同一行改成紅字提示，仍未設定時間
+        hint = find_label(popup(app), "看不懂這個時間。例如 15:30 或 1530，按 Enter 確定")
+        self.assertEqual(hint.cget("fg"), daynote.RED)
         self.assertIsNone(app.new_time)
 
     def test_add_task_without_date(self):

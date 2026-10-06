@@ -1275,14 +1275,17 @@ class TimePicker(_Popup):
         self.custom.pack(side="left", padx=px(6))
         self.custom.bind("<Return>", lambda e: self._pick_custom())
         self._link(row, "確定", self._pick_custom).pack(side="left")
-        self.hint = tk.Label(self.body, text="", bg=CARD_BG, fg=RED, font=SMALL, anchor="w")
-        self.hint.pack(fill="x")
+        # 一打開就說明輸入方式；輸入錯誤時同一行改成紅字
+        self.hint = tk.Label(self.body, text=self.HINT, bg=CARD_BG, fg=GRAY, font=SMALL, anchor="w")
+        self.hint.pack(fill="x", pady=(0, px(6)))
         self._link(self.body, "不設時間", lambda: self.pick(None), fg=GRAY).pack(anchor="w")
+
+    HINT = "例如 15:30 或 1530，按 Enter 確定"
 
     def _pick_custom(self):
         value = parse_time_text(self.custom.get())
         if value is None:
-            self.hint.config(text="請輸入時間，例如 15:30 或 1530")
+            self.hint.config(text=f"看不懂這個時間。{self.HINT}", fg=RED)
             return
         self.pick(value)
 
@@ -1742,7 +1745,7 @@ class App(tk.Tk):
         top.pack(fill="x", padx=(px(12), px(4)), pady=(px(6), 0))
         # 右側按鈕群先 pack，空間不足時被壓縮的是日期標題，而不是按鈕
         tools = tk.Frame(top, bg=BG)
-        tools.pack(side="right", anchor="n", pady=(px(8), 0))  # 按鈕固定在右上角，離視窗上緣留一點距離
+        tools.pack(side="right", anchor="n", pady=(px(18), 0))  # 按鈕固定在右上角；離上緣留空白，太貼邊會有壓迫感
         self.btn_login = tk.Label(tools, text="登入", bg=ACCENT, fg="white", font=FONT,
                                   padx=px(8), cursor="hand2")
         self.btn_login.bind("<Button-1>", lambda e: self.login())
