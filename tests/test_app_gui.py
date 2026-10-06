@@ -145,17 +145,25 @@ def descendants(widget):
         yield from descendants(child)
 
 
+def _shown_text(w):
+    """Label 與膠囊按鈕（Pill，Canvas 繪製）顯示的文字；其他元件回傳 None。"""
+    if isinstance(w, daynote.Pill):
+        return w.text_value
+    if isinstance(w, tk.Label):
+        return w.cget("text")
+    return None
+
+
 def texts(widget):
-    """元件底下所有 Label 顯示的文字。"""
-    return [w.cget("text") for w in descendants(widget) if isinstance(w, tk.Label)]
+    """元件底下所有 Label 與按鈕顯示的文字。"""
+    return [t for t in (_shown_text(w) for w in descendants(widget)) if t is not None]
 
 
 def find_label(widget, text, exact=True):
     for w in descendants(widget):
-        if isinstance(w, tk.Label):
-            value = w.cget("text")
-            if value == text or (not exact and text in value):
-                return w
+        value = _shown_text(w)
+        if value is not None and (value == text or (not exact and text in value)):
+            return w
     raise AssertionError(f"畫面上找不到「{text}」；目前有：{texts(widget)}")
 
 
@@ -355,8 +363,8 @@ class StartupTest(AppTestCase):
         # Then: 畫面顯示任務、清單下拉與同步狀態
         self.assertIn("寫週報", self.list_texts())
         self.assertIn("今天 · 1 項", self.list_texts())
-        self.assertEqual(app.cmb_list.get(), "工作")
-        self.assertEqual(list(app.cmb_list["values"]), ["工作", "個人", daynote.ADD_LIST_OPTION])
+        self.assertEqual(app.current_list()["title"], "工作")
+        self.assertEqual([lst["title"] for lst in app.lists], ["工作", "個人"])
         self.assertTrue(self.status().startswith("已同步"))
         self.assertTrue(app.btn_logout.winfo_ismapped())
 
@@ -370,15 +378,14 @@ class StartupTest(AppTestCase):
         self.assertEqual(app.hotkeys_registered, {1, 2})
 
     def test_logged_out_shows_prompt(self):
-        """未登入啟動 > 清單區顯示登入提示、下拉選單停用"""
+        """未登入啟動 > 清單區顯示登入提示、沒有可用的清單"""
         # Given: 沒有登入憑證
         self.g = StoreGoogle(logged_in=False)
         # When: 啟動
         app = self.start()
         # Then: 登入提示
         self.assertIn("尚未登入 Google", self.list_texts())
-        self.assertEqual(app.cmb_list.get(), "請先登入")
-        self.assertEqual(str(app.cmb_list.cget("state")), "disabled")
+        self.assertIsNone(app.current_list())
         self.assertNotIn("tasklists", self.g.calls)
 
     def test_add_task_when_logged_out(self):
@@ -460,161 +467,353 @@ class StartupTest(AppTestCase):
         self.assertIn("尚未登入 Google", self.list_texts())
         self.assertTrue(app.btn_login.winfo_ismapped())
         self.assertFalse(app.btn_logout.winfo_ismapped())
-        self.assertEqual(app.cmb_list.get(), "請先登入")
 
 
 # ---------------------------------------------------------------- 新增工作
 
 class AddTaskTest(AppTestCase):
+    """底部快捷新增：輸入框（Enter）、最右邊「新增」按鈕、即時辨識結果。"""
 
     def test_add_task_today(self):
-        """輸入標題按 Enter > 新增到今天、目前清單，清單立即顯示"""
+        """輸入標題按 Enter > 新增到月曆選中的那天（今天）、上次用的清單"""
         # Given: 已登入
         self.start()
         # When: 新增
         self.type_new_task("買牛奶")
         # Then: 畫面與 Google 都有
         self.assertIn("買牛奶", self.list_texts())
-        self.assertEqual(self.status(), "已新增到「工作」")
+        self.assertEqual(self.status(), "已新增「買牛奶」到「工作」")
         (raw,) = self.g.by_title("買牛奶")
-        self.assertEqual(raw["due"][:10], self.today.isoformat())
-        self.assertEqual(raw["list_id"], "L1")
+        self.assertEqual((raw["due"][:10], raw["list_id"]), (self.today.isoformat(), "L1"))
 
-    def test_add_task_with_reminder_time(self):
-        """在時間選擇器輸入 15:00 再新增 > 詳細資訊寫入 ⏰ 15:00，狀態列提示提醒時間"""
+    def test_quick_add_parses_date_and_time(self):
+        """輸入「明天 3點 開會」 > 辨識成明天 15:00 的「開會」，狀態列說明放在哪天"""
         # Given: 已登入
-        app = self.start()
-        # When: 開時間選擇器輸入 15:00，再新增
-        click(app.btn_new_time)
-        type_time(app, "15:00")
-        self.assertEqual(app.btn_new_time.cget("text"), "⏰ 15:00")
-        self.type_new_task("繳電費")
-        # Then: 帶提醒時間，且時間只套用這一筆
-        (raw,) = self.g.by_title("繳電費")
+        self.start()
+        # When: 新增
+        self.type_new_task("明天 3點 開會")
+        # Then: 欄位正確
+        (raw,) = self.g.by_title("開會")
+        self.assertEqual(raw["due"][:10], (self.today + dt.timedelta(days=1)).isoformat())
         self.assertEqual(raw["notes"], "⏰ 15:00")
-        self.assertEqual(self.status(), "已新增到「工作」，15:00 提醒")
-        self.assertEqual(app.btn_new_time.cget("text"), "⏰")
+        self.assertEqual(self.status(), "已新增「開會」到「工作」（明天），15:00 提醒")
 
-    def test_placeholder_hints_enter(self):
-        """輸入框沒有文字 > 提示文字寫明按 Enter 新增"""
-        # Given / When: 啟動
+    def test_list_tag(self):
+        """輸入「看牙醫 #個人」 > 放進個人清單"""
+        # Given: 已登入
+        self.start()
+        # When: 新增
+        self.type_new_task("看牙醫 #個人")
+        # Then: L2
+        (raw,) = self.g.by_title("看牙醫")
+        self.assertEqual(raw["list_id"], "L2")
+
+    def test_default_due_is_selected_day(self):
+        """月曆選了另一天、沒寫日期 > 放在選中的那天"""
+        # Given: 選了同月份的另一天
+        other = self.today + dt.timedelta(days=1 if self.today.day < 20 else -1)
         app = self.start()
-        # Then: 提示文字
-        self.assertEqual(app.entry.get(), "新增工作（Enter）")
+        cal_click(app, other)
+        # When: 新增
+        self.type_new_task("交報告")
+        # Then: 那一天
+        (raw,) = self.g.by_title("交報告")
+        self.assertEqual(raw["due"][:10], other.isoformat())
 
-    def test_plus_button_adds_typed_task(self):
-        """輸入標題後點「＋」 > 和按 Enter 一樣新增"""
+    def test_add_button_adds(self):
+        """輸入後點最右邊「新增」 > 和按 Enter 一樣新增"""
         # Given: 輸入框有文字
         app = self.start()
         app.entry.focus_force()
         app.update()
         app.entry.insert(0, "買牛奶")
-        # When: 點 ＋
+        # When: 點「新增」
         click(app.btn_add)
         settle(app)
         # Then: 已新增
         self.assertEqual(len(self.g.by_title("買牛奶")), 1)
         self.assertIn("買牛奶", self.list_texts())
 
-    def test_plus_button_without_text_focuses_entry(self):
-        """還沒輸入就點「＋」 > 不新增，游標移到輸入框"""
+    def test_add_button_without_text_focuses_entry(self):
+        """還沒輸入就點「新增」 > 不新增，游標移到輸入框"""
         # Given: 輸入框只有提示文字
         app = self.start()
         app.cal.focus_force()
         app.update()
-        # When: 點 ＋
+        # When: 點「新增」
         click(app.btn_add)
         settle(app)
-        # Then: 沒有新增，焦點在輸入框、提示文字收起
+        # Then: 沒有新增，焦點在輸入框
         self.assertNotIn("add_task", self.g.calls)
         self.assertIs(app.focus_get(), app.entry)
-        self.assertEqual(app.entry.get(), "")
 
-    def test_time_picker_has_no_presets(self):
-        """打開時間選擇器 > 沒有預設時間，游標直接在時間欄位"""
+    def test_placeholder_shows_example(self):
+        """輸入框沒有文字 > 提示文字示範可以寫日期時間"""
+        # Given / When: 啟動
+        app = self.start()
+        # Then: 提示文字
+        self.assertEqual(app.entry.get(), "新增工作，例如：明天 3點 開會")
+
+    def test_chips_while_typing(self):
+        """快捷輸入打字時 > 新增列上方即時顯示辨識結果；清空 > 收起"""
         # Given: 已登入
         app = self.start()
-        # When: 打開時間選擇器
-        click(app.btn_new_time)
-        picker = popup(app)
-        # Then: 只有輸入欄、確定、不設時間
-        shown = texts(picker)
-        self.assertFalse(any(re_time(t) for t in shown), shown)
-        self.assertIn("不設時間", shown)
-        self.assertIsInstance(app.focus_get(), tk.Entry)
+        app.entry.focus_force()
+        app.update()
+        # When: 打字
+        app.entry.insert(0, "明天 3點 開會")
+        app.entry.event_generate("<KeyRelease>")
+        app.update()
+        # Then: 顯示辨識結果
+        self.assertTrue(app.lbl_quick_chips.winfo_ismapped())
+        self.assertEqual(app.lbl_quick_chips.cget("text"), "📅 明天　⏰ 15:00　📁 工作")
+        # When: 清空
+        app.entry.delete(0, "end")
+        app.entry.event_generate("<KeyRelease>")
+        app.update()
+        # Then: 收起
+        self.assertFalse(app.lbl_quick_chips.winfo_ismapped())
 
-    def test_time_picker_shows_input_hint(self):
-        """打開時間選擇器 > 不用先輸入錯誤，就以灰字顯示輸入範例"""
+    def test_only_date_refused(self):
+        """只寫日期時間沒有標題 > 紅字提示，不建立"""
         # Given: 已登入
-        app = self.start()
-        # When: 打開時間選擇器
-        click(app.btn_new_time)
-        # Then: 灰字範例
-        hint = find_label(popup(app), "例如 15:30 或 1530，按 Enter 確定")
-        self.assertEqual(hint.cget("fg"), daynote.GRAY)
-
-    def test_time_picker_invalid_input(self):
-        """時間欄位輸入看不懂的內容 > 顯示格式提示，不套用"""
-        # Given: 時間選擇器
-        app = self.start()
-        click(app.btn_new_time)
-        # When: 輸入無效時間
-        type_time(app, "25:00")
-        # Then: 同一行改成紅字提示，仍未設定時間
-        hint = find_label(popup(app), "看不懂這個時間。例如 15:30 或 1530，按 Enter 確定")
-        self.assertEqual(hint.cget("fg"), daynote.RED)
-        self.assertIsNone(app.new_time)
-
-    def test_add_task_without_date(self):
-        """日期選「無日期」再新增 > 出現在「未排日期」區塊"""
-        # Given: 已登入
-        app = self.start()
-        # When: 選無日期並新增，再展開未排日期
-        click(app.btn_new_due)
-        click(find_label(popup(app), "無日期"))
-        self.type_new_task("整理書櫃")
-        click(find_label(app.list_frame, "▶ 未排日期（1）"))
-        # Then: 沒有日期，顯示在未排日期
-        (raw,) = self.g.by_title("整理書櫃")
-        self.assertIsNone(raw["due"])
-        self.assertIn("整理書櫃", self.list_texts())
-
-    def test_add_task_to_other_list(self):
-        """下拉選單切到「個人」再新增 > 放進個人清單，並記住選擇"""
-        # Given: 已登入
-        app = self.start()
-        # When: 切換清單後新增
-        app.cmb_list.current(1)
-        app.cmb_list.event_generate("<<ComboboxSelected>>")
-        self.type_new_task("看牙醫")
-        # Then: 放進 L2
-        (raw,) = self.g.by_title("看牙醫")
-        self.assertEqual(raw["list_id"], "L2")
-        self.assertEqual(app.state_data["last_list_id"], "L2")
-
-    def test_add_new_list(self):
-        """選「新增清單」並輸入名稱 > 建立清單並設為目前清單"""
-        # Given: 已登入
-        app = self.start()
-        # When: 選最後一項並輸入名稱
-        with unittest.mock.patch.object(daynote, "ask_text", lambda *a, **k: "旅行"):
-            app.cmb_list.current(len(app.lists))
-            app.cmb_list.event_generate("<<ComboboxSelected>>")
-            settle(app)
-        # Then: 新清單被選取
-        self.assertEqual(app.cmb_list.get(), "旅行")
-        self.assertEqual(self.status(), "已建立清單「旅行」，新增的工作會放進這個清單")
+        self.start()
+        # When: 只有日期時間
+        self.type_new_task("明天 3點")
+        # Then: 擋下
+        self.assertEqual(self.status(), "請輸入工作內容（目前只有日期或時間）")
+        self.assertNotIn("add_task", self.g.calls)
 
     def test_add_task_failure_restores_input(self):
-        """新增失敗 > 紅字錯誤，輸入框放回原本的標題"""
+        """新增失敗 > 紅字錯誤，輸入框放回原本整行"""
         # Given: 新增會失敗
         app = self.start()
         self.g.fail.add("add_task")
         # When: 新增
-        self.type_new_task("買牛奶")
-        # Then: 標題還在
+        self.type_new_task("明天 3點 開會")
+        # Then: 整行還在
         self.assertEqual(self.status(), "add_task failed")
-        self.assertEqual(app.entry.get(), "買牛奶")
+        self.assertEqual(app.entry.get(), "明天 3點 開會")
+
+
+class NewTaskPageTest(AppTestCase):
+    """完整新增頁（點「詳細」）：一次設定標題、詳細資訊、日期、提醒、重複與清單。"""
+
+    def open_page(self):
+        app = self.app
+        click(app.btn_detail)
+        self.assertEqual(app.lbl_date.cget("text"), "新增工作")
+        return app
+
+    def test_detail_button_opens_page_with_defaults(self):
+        """點「詳細」 > 新增頁開啟，游標在標題，預設今天、不提醒、不重複、上次用的清單"""
+        # Given: 已登入
+        self.start()
+        # When: 點「詳細」
+        app = self.open_page()
+        # Then: 預設值
+        shown = texts(app.detail_view)
+        for chip in ("📁 工作 ▾", "📅 今天 ▾", "⏰ 加提醒時間 ▾", "🔁 不重複 ▾", "＋ 建立", "取消"):
+            self.assertIn(chip, shown)
+        self.assertIs(app.focus_get(), app.draft_title)
+
+    def test_typed_text_is_parsed_into_fields(self):
+        """先在輸入框打「明天 3點 開會 #個人」再點「詳細」 > 標題「開會」，日期時間清單填好"""
+        # Given: 輸入框有文字
+        app = self.start()
+        app.entry.focus_force()
+        app.update()
+        app.entry.insert(0, "明天 3點 開會 #個人")
+        # When: 點「詳細」
+        self.open_page()
+        # Then: 欄位帶入
+        self.assertEqual(app.draft_title.get(), "開會")
+        shown = texts(app.detail_view)
+        for chip in ("📁 個人 ▾", "📅 明天 ▾", "⏰ 15:00 ▾"):
+            self.assertIn(chip, shown)
+
+    def test_create_with_all_fields(self):
+        """填好標題、詳細資訊、明天、20:00、每天、個人後按「建立」 > 全部寫入，回主畫面跳到明天並記住清單"""
+        # Given: 新增頁
+        self.start()
+        app = self.open_page()
+        app.draft_title.insert(0, "繳房租")
+        app.draft_notes.insert("1.0", "轉帳給房東")
+        # When: 設定各欄位後建立
+        click(find_label(app.detail_view, "📅", exact=False))
+        click(find_label(popup(app), "明天"))
+        click(find_label(app.detail_view, "⏰ 加提醒時間 ▾"))
+        type_time(app, "20:00")
+        click(find_label(app.detail_view, "🔁 不重複 ▾"))
+        click(find_label(popup(app), "每天"))
+        app.choose_draft_list(1)
+        self.assertEqual(app.draft_title.get(), "繳房租")  # 重畫後輸入中的內容還在
+        click(find_label(app.detail_view, "＋ 建立"))
+        settle(app)
+        # Then: Google 上的欄位、畫面、記住的清單
+        tomorrow = self.today + dt.timedelta(days=1)
+        (raw,) = self.g.by_title("繳房租")
+        self.assertEqual((raw["list_id"], raw["due"][:10]), ("L2", tomorrow.isoformat()))
+        self.assertEqual(raw["notes"], "⏰ 20:00\n🔁 每天\n轉帳給房東")
+        self.assertTrue(app.main_view.winfo_ismapped())
+        self.assertEqual(app.selected, tomorrow)
+        self.assertIn("繳房租", self.list_texts())
+        self.assertEqual(app.current_list()["id"], "L2")
+        self.assertEqual(self.status(), "已新增「繳房租」到「個人」，20:00 提醒")
+
+    def test_enter_in_title_creates(self):
+        """在標題按 Enter > 直接建立"""
+        # Given: 新增頁打好標題
+        self.start()
+        app = self.open_page()
+        app.draft_title.insert(0, "買牛奶")
+        # When: Enter
+        key(app.draft_title, "<Return>")
+        settle(app)
+        # Then: 已建立
+        self.assertEqual(len(self.g.by_title("買牛奶")), 1)
+        self.assertIsNone(app.draft)
+
+    def test_no_date_goes_undated(self):
+        """日期選「無日期」後建立 > 出現在「未排日期」"""
+        # Given: 新增頁
+        self.start()
+        app = self.open_page()
+        app.draft_title.insert(0, "整理書櫃")
+        # When: 無日期並建立
+        click(find_label(app.detail_view, "📅", exact=False))
+        click(find_label(popup(app), "無日期"))
+        click(find_label(app.detail_view, "＋ 建立"))
+        settle(app)
+        click(find_label(app.list_frame, "▶ 未排日期（1）"))
+        # Then: 沒有日期
+        (raw,) = self.g.by_title("整理書櫃")
+        self.assertIsNone(raw["due"])
+        self.assertIn("整理書櫃", self.list_texts())
+
+    def test_empty_title_refused(self):
+        """沒有標題就按「建立」 > 紅字提示，留在新增頁"""
+        # Given: 新增頁
+        self.start()
+        app = self.open_page()
+        # When: 建立
+        click(find_label(app.detail_view, "＋ 建立"))
+        pump(app, 0.2)
+        # Then: 擋下
+        self.assertEqual(self.status(), "請輸入工作標題")
+        self.assertIsNotNone(app.draft)
+        self.assertNotIn("add_task", self.g.calls)
+
+    def test_cancel_without_content(self):
+        """什麼都沒填就按「取消」 > 不詢問，回主畫面"""
+        # Given: 空白的新增頁
+        self.start()
+        app = self.open_page()
+        # When: 取消
+        click(find_label(app.detail_view, "取消"))
+        # Then: 回主畫面
+        self.assertIsNone(app.draft)
+        self.assertEqual(self.dialogs, [])
+        self.assertTrue(app.main_view.winfo_ismapped())
+
+    def test_cancel_with_content_asks(self):
+        """已經打了內容按 Esc > 詢問；選否留下、選是放棄"""
+        # Given: 打了標題
+        self.start()
+        app = self.open_page()
+        app.draft_title.insert(0, "買牛奶")
+        # When: Esc 並選否
+        self.answer["askyesno"] = False
+        key(app.draft_title, "<Escape>")
+        # Then: 還在
+        self.assertEqual(self.dialogs[-1][1], "放棄新增")
+        self.assertEqual(app.draft_title.get(), "買牛奶")
+        # When: 再按並選是
+        self.answer["askyesno"] = True
+        key(app.draft_title, "<Escape>")
+        # Then: 放棄
+        self.assertIsNone(app.draft)
+        self.assertNotIn("add_task", self.g.calls)
+
+    def test_create_failure_stays_on_page(self):
+        """建立失敗 > 紅字錯誤，留在新增頁、內容不會不見"""
+        # Given: 新增會失敗
+        self.start()
+        self.g.fail.add("add_task")
+        app = self.open_page()
+        app.draft_title.insert(0, "買牛奶")
+        # When: 建立
+        click(find_label(app.detail_view, "＋ 建立"))
+        settle(app)
+        # Then: 還在
+        self.assertEqual(self.status(), "add_task failed")
+        self.assertEqual(app.draft_title.get(), "買牛奶")
+
+    def test_new_list_from_page(self):
+        """清單選「新增清單」並輸入名稱 > 建立清單並選取，之後新增預設用它"""
+        # Given: 新增頁
+        self.start()
+        app = self.open_page()
+        # When: 新增清單
+        with unittest.mock.patch.object(daynote, "ask_text", lambda *a, **k: "旅行"):
+            app.choose_draft_list(len(app.lists))
+            settle(app)
+        # Then: 已選取
+        self.assertIn("📁 旅行 ▾", texts(app.detail_view))
+        self.assertEqual(app.current_list()["title"], "旅行")
+        self.assertEqual(self.status(), "已建立清單「旅行」，新增的工作會放進這個清單")
+
+    def test_sync_keeps_page(self):
+        """新增頁開著時背景同步 > 標題與輸入中的內容不被蓋掉"""
+        # Given: 新增頁打了標題
+        self.start()
+        app = self.open_page()
+        app.draft_title.insert(0, "買牛奶")
+        # When: 同步
+        app.refresh()
+        settle(app)
+        # Then: 不變
+        self.assertEqual(app.lbl_date.cget("text"), "新增工作")
+        self.assertEqual(app.draft_title.get(), "買牛奶")
+
+    def test_logged_out(self):
+        """未登入點「詳細」 > 紅字提示先登入，不開新增頁"""
+        # Given: 未登入
+        self.g = StoreGoogle(logged_in=False)
+        app = self.start()
+        # When: 點「詳細」
+        click(app.btn_detail)
+        # Then: 提示
+        self.assertEqual(self.status(), "請先登入 Google（右上角「登入」）")
+        self.assertIsNone(app.draft)
+
+    def test_time_picker_has_no_presets_and_hint(self):
+        """打開時間選擇器 > 沒有預設時間、游標在時間欄位、灰字顯示輸入範例"""
+        # Given: 新增頁
+        self.start()
+        app = self.open_page()
+        # When: 打開時間選擇器
+        click(find_label(app.detail_view, "⏰ 加提醒時間 ▾"))
+        picker = popup(app)
+        # Then: 只有輸入欄
+        shown = texts(picker)
+        self.assertFalse(any(re_time(t) for t in shown), shown)
+        self.assertIn("不設時間", shown)
+        self.assertIsInstance(app.focus_get(), tk.Entry)
+        self.assertEqual(find_label(picker, "例如 15:30 或 1530，按 Enter 確定").cget("fg"), daynote.GRAY)
+
+    def test_time_picker_invalid_input(self):
+        """時間欄位輸入看不懂的內容 > 同一行改紅字，不套用"""
+        # Given: 時間選擇器
+        self.start()
+        app = self.open_page()
+        click(find_label(app.detail_view, "⏰ 加提醒時間 ▾"))
+        # When: 無效時間
+        type_time(app, "25:00")
+        # Then: 紅字、未設定
+        hint = find_label(popup(app), "看不懂這個時間。例如 15:30 或 1530，按 Enter 確定")
+        self.assertEqual(hint.cget("fg"), daynote.RED)
+        self.assertIsNone(app.draft["time"])
 
 
 # ---------------------------------------------------------------- 完成、復原
@@ -1199,9 +1398,9 @@ class QuickBarTest(AppTestCase):
 
     def test_default_list_is_current(self):
         """沒寫 #清單 > 用主畫面目前選的清單"""
-        # Given: 主畫面選了「個人」
+        # Given: 上次新增用的是「個人」
         app = self.start()
-        app.cmb_list.current(1)
+        app._remember_list(1)
         bar = self.open_bar()
         self.type_in(bar, "買牛奶")
         # When: Enter

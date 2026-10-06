@@ -241,6 +241,17 @@ class QuickRecurAndListTest(unittest.TestCase):
         # Then: 空標題
         self.assertEqual(result["title"], "")
 
+    def test_default_due_from_calendar(self):
+        """主畫面月曆選了 10/20、沒寫日期 > 放在 10/20；只寫時間也是那天（不因已過改明天）"""
+        cases = {"交報告": (D(2026, 10, 20), None), "9:00 晨會": (D(2026, 10, 20), T(9, 0)),
+                 "明天 交報告": (D(2026, 10, 7), None), "每週五 週報": (D(2026, 10, 23), None)}
+        for text, (due, at) in cases.items():
+            with self.subTest(text=text):
+                # Given / When: 帶入月曆選中的日子
+                result = daynote.parse_quick(text, LISTS, TODAY, NOW, default_due=D(2026, 10, 20))
+                # Then: 沒寫日期才用它；重複規則從那天起算
+                self.assertEqual((result["due"], result["time"]), (due, at))
+
     def test_plain_text_defaults_today(self):
         """什麼都沒寫 > 今天、無時間、無重複"""
         # Given / When: 純標題
