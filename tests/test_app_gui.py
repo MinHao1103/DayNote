@@ -5,7 +5,7 @@
 隔離（測試不得影響使用者的真實環境）：
 - Google：以記憶體版 StoreGoogle 取代，不連網
 - data 資料夾：state.json、token.bin 等路徑改到暫存資料夾
-- Windows：釘選桌面、圓角、背景視窗、全域快捷鍵、訊息攔截改為替身，不搶執行中 DayNote 的 F8
+- Windows：釘選桌面、圓角、背景視窗、全域快捷鍵、訊息攔截改為替身，不搶執行中 DayNote 的快捷鍵
 - 對話框、提示音、剪貼簿、瀏覽器：一律替身
 
 以下需要真實 Windows／Google 環境，不在此自動化，改列手動驗證：
@@ -26,6 +26,9 @@ import unittest.mock
 from tests.test_recur import daynote
 
 HOLIDAY_CAL = "holiday-test"
+# Windows 送來的快捷鍵 id：依 HOTKEY_ACTIONS 找，對調按鍵時測試不用改
+WINDOW_KEY = next(i for i, action in daynote.HOTKEY_ACTIONS.items() if action == "toggle_window")  # F8
+QUICK_KEY = next(i for i, action in daynote.HOTKEY_ACTIONS.items() if action == "quick_bar")      # Ctrl + Alt + D
 
 
 class StoreGoogle:
@@ -1088,8 +1091,8 @@ class WindowTest(AppTestCase):
         app.update()
         # Then: 隱藏
         self.assertEqual(app.state(), "withdrawn")
-        # When: Ctrl + Alt + D（Windows 送來 id 2）
-        self.hotkey_callback(2)
+        # When: F8
+        self.hotkey_callback(WINDOW_KEY)
         pump(app, 0.3)
         # Then: 顯示
         self.assertEqual(app.state(), "normal")
@@ -1107,13 +1110,13 @@ class WindowTest(AppTestCase):
         self.assertTrue(daynote.load_state()["topmost"])
 
 
-# ---------------------------------------------------------------- 快速列（F8）
+# ---------------------------------------------------------------- 快速列（Ctrl + Alt + D）
 
 class QuickBarTest(AppTestCase):
 
     def open_bar(self):
-        """按 F8（Windows 送來 id 1）叫出快速列。"""
-        self.hotkey_callback(1)
+        """按 Ctrl + Alt + D 叫出快速列。"""
+        self.hotkey_callback(QUICK_KEY)
         pump(self.app, 0.3)
         bar = self.app.quick_bar
         self.assertTrue(bar.is_open())
@@ -1125,15 +1128,15 @@ class QuickBarTest(AppTestCase):
         bar.text.set(text)
         self.app.update()
 
-    def test_f8_opens_bar_with_agenda(self):
-        """按 F8 > 快速列出現、游標在輸入列，列出逾期與今天的待辦和輸入範例"""
+    def test_hotkey_opens_bar_with_agenda(self):
+        """按 Ctrl + Alt + D > 快速列出現、游標在輸入列，列出逾期與今天的待辦和輸入範例"""
         # Given: 逾期一筆、今天兩筆、明天一筆
         self.g.seed("回信", self.today - dt.timedelta(days=1))
         self.g.seed("晨會", self.today, notes="⏰ 09:00")
         self.g.seed("寫週報", self.today)
         self.g.seed("明天的事", self.today + dt.timedelta(days=1))
         self.start()
-        # When: F8
+        # When: Ctrl + Alt + D
         bar = self.open_bar()
         # Then: 逾期在前、今天依時間，明天的不列
         shown = texts(bar.win)
@@ -1142,13 +1145,13 @@ class QuickBarTest(AppTestCase):
         self.assertEqual([t["title"] for t in bar.items], ["回信", "晨會", "寫週報"])
         self.assertIn(daynote.QuickBar.EXAMPLE, shown)
 
-    def test_f8_again_closes(self):
-        """快速列開著再按 F8 > 關閉"""
+    def test_hotkey_again_closes(self):
+        """快速列開著再按 Ctrl + Alt + D > 關閉"""
         # Given: 快速列開著
         self.start()
         bar = self.open_bar()
-        # When: 再按 F8
-        self.hotkey_callback(1)
+        # When: 再按 Ctrl + Alt + D
+        self.hotkey_callback(QUICK_KEY)
         pump(self.app, 0.3)
         # Then: 關閉
         self.assertFalse(bar.is_open())
@@ -1302,13 +1305,13 @@ class QuickBarTest(AppTestCase):
         # Then: 關閉
         self.assertFalse(bar.is_open())
 
-    def test_hidden_window_f8_then_tab(self):
-        """主視窗隱藏時按 F8 > 快速列照樣出現；按 Tab > 主視窗回來、快速列關閉"""
-        # Given: 主視窗已隱藏（實際使用情境：在瀏覽器裡按 F8）
+    def test_hidden_window_hotkey_then_tab(self):
+        """主視窗隱藏時按 Ctrl + Alt + D > 快速列照樣出現；按 Tab > 主視窗回來、快速列關閉"""
+        # Given: 主視窗已隱藏（實際使用情境：在瀏覽器裡按 Ctrl + Alt + D）
         app = self.start()
         click(app.btn_min)
         self.assertEqual(app.state(), "withdrawn")
-        # When: F8
+        # When: Ctrl + Alt + D
         bar = self.open_bar()
         # Then: 快速列可見且有焦點
         self.assertTrue(bar.win.winfo_ismapped())
@@ -1320,12 +1323,12 @@ class QuickBarTest(AppTestCase):
         self.assertFalse(bar.is_open())
         self.assertEqual(app.state(), "normal")
 
-    def test_ctrl_alt_d_still_toggles_window(self):
-        """按 Ctrl + Alt + D > 仍是顯示／隱藏主視窗，不開快速列"""
+    def test_f8_toggles_window(self):
+        """按 F8 > 顯示／隱藏主視窗，不開快速列"""
         # Given: 主視窗顯示中
         app = self.start()
-        # When: Ctrl + Alt + D
-        self.hotkey_callback(2)
+        # When: F8
+        self.hotkey_callback(WINDOW_KEY)
         pump(app, 0.3)
         # Then: 隱藏、沒有快速列
         self.assertEqual(app.state(), "withdrawn")
@@ -1343,7 +1346,7 @@ class QuickBarTest(AppTestCase):
         self.assertFalse(bar.is_open())
 
     def test_logged_out(self):
-        """未登入按 F8 > 提示按 Tab 登入；輸入後 Enter > 紅字提示，不呼叫 Google"""
+        """未登入叫出快速列 > 提示按 Tab 登入；輸入後 Enter > 紅字提示，不呼叫 Google"""
         # Given: 未登入
         self.g = StoreGoogle(logged_in=False)
         app = self.start()

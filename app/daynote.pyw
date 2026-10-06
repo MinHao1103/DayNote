@@ -313,14 +313,14 @@ _WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint, wi
 WM_HOTKEY = 0x0312
 MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
 VK_D, VK_F8 = 0x44, 0x77
-# 全域快捷鍵：(id, 修飾鍵, 按鍵, 顯示名稱)。F8 為主；保留 Ctrl + Alt + D 給舊使用者，也當 F8 被占用時的備援
+# 全域快捷鍵：(id, 修飾鍵, 按鍵, 顯示名稱)；各自的動作見 HOTKEY_ACTIONS
 HOTKEYS = (
     (1, MOD_NOREPEAT, VK_F8, "F8"),
     (2, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_D, "Ctrl + Alt + D"),
 )
 HOTKEY_IDS = {hk[0] for hk in HOTKEYS}
-# 快捷鍵對應的動作：F8 叫出快速列（在任何程式中新增／完成），Ctrl + Alt + D 顯示／隱藏主視窗
-HOTKEY_ACTIONS = {1: "quick_bar", 2: "toggle_window"}
+# 快捷鍵對應的動作：F8 顯示／隱藏主視窗（使用者要求），Ctrl + Alt + D 叫出快速列（在任何程式中新增／完成）
+HOTKEY_ACTIONS = {1: "toggle_window", 2: "quick_bar"}
 
 
 def win_hook_messages(widget, on_user_minimize=None, on_hotkey=None):
@@ -373,12 +373,12 @@ def win_unregister_hotkey(widget, hotkey_id):
 
 
 def hotkey_status_message(failed):
-    """依註冊失敗的快捷鍵名稱，產生狀態列提示。兩組功能不同（F8 快速列、Ctrl + Alt + D 主視窗），分開說明。"""
+    """依註冊失敗的快捷鍵名稱，產生狀態列提示。兩組功能不同（F8 主視窗、Ctrl + Alt + D 快速列），分開說明。"""
     if "F8" in failed and "Ctrl + Alt + D" in failed:
         return "F8 和 Ctrl + Alt + D 都已被其他程式占用；隱藏後請再點 StartDayNote 叫回"
     if "F8" in failed:
-        return "F8 已被其他程式占用，無法叫出快速列；主視窗仍可用 Ctrl + Alt + D 顯示／隱藏"
-    return "Ctrl + Alt + D 已被其他程式占用；隱藏後請按 F8 叫出快速列，再按 Tab 開啟主視窗"
+        return "F8 已被其他程式占用；隱藏後請按 Ctrl + Alt + D 叫出快速列，再按 Tab 開啟主視窗"
+    return "Ctrl + Alt + D 已被其他程式占用，無法叫出快速列；主視窗仍可用 F8 顯示／隱藏"
 
 
 def win_set_background_window(widget):
@@ -1543,7 +1543,7 @@ class ReminderToast:
 
 
 class QuickBar:
-    """快速列（F8）：螢幕中央的一條輸入列，不用打開主視窗就能新增、完成、搜尋待辦。
+    """快速列（Ctrl + Alt + D）：螢幕中央的一條輸入列，不用打開主視窗就能新增、完成、搜尋待辦。
 
     - 空白時：列出逾期與今天的待辦，↑↓ 選擇、Space 完成、Enter 開啟詳細頁
     - 打字時：即時辨識日期、時間、重複、#清單（parse_quick），Enter 新增
@@ -1963,7 +1963,7 @@ class App(tk.Tk):
             self.toggle_visible()
 
     def toggle_visible(self):
-        """Ctrl + Alt + D：隱藏中就叫回來並放到最前面，顯示中就隱藏。"""
+        """F8：隱藏中就叫回來並放到最前面，顯示中就隱藏。"""
         if self.state() == "withdrawn":
             self.deiconify()
             self.lift()
@@ -2031,7 +2031,7 @@ class App(tk.Tk):
 
     def minimize(self):
         if not self.show_in_taskbar:
-            self.withdraw()  # 背景模式：隱藏視窗，程式與提醒照常執行；Ctrl + Alt + D（或 F8 快速列按 Tab）叫回
+            self.withdraw()  # 背景模式：隱藏視窗，程式與提醒照常執行；F8（或快速列按 Tab）叫回
             return
         if self.borderless:
             self._mark_user_minimize()  # 自己按「—」縮小，不是 Win + D
@@ -2117,7 +2117,7 @@ class App(tk.Tk):
         self._paint_pin()
         self.btn_min = self._icon_button(
             tools, "—", self.minimize,
-            tip=lambda: "縮小到工作列" if self.show_in_taskbar else "隱藏到背景（Ctrl + Alt + D 叫回，或按 F8 後按 Tab）")
+            tip=lambda: "縮小到工作列" if self.show_in_taskbar else "隱藏到背景（F8 叫回）")
         btn_close = self._icon_button(tools, "✕", self.close, tip="關閉")
         if self.borderless:
             self.btn_min.pack(side="left")
@@ -3251,10 +3251,10 @@ class App(tk.Tk):
         notes = join_meta(time_value, rule, "")
         self.run_bg(lambda: self.g.add_task(lst["id"], title, due, notes=notes or None), done)
 
-    # ---- 快速列（F8）
+    # ---- 快速列（Ctrl + Alt + D）
 
     def toggle_quick_bar(self):
-        """F8：在任何程式中叫出快速列；已開著就關閉。"""
+        """Ctrl + Alt + D：在任何程式中叫出快速列；已開著就關閉。"""
         bar = getattr(self, "quick_bar", None)
         if bar and bar.is_open():
             bar.close()

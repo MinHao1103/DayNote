@@ -96,7 +96,7 @@ class RegisterHotkeyTest(unittest.TestCase):
         self.assertIsNone(app.status)
 
     def test_f8_occupied_after_retries(self):
-        """重試用完 F8 仍被占用 > 狀態列紅字說明快速列不能用、主視窗仍可用 Ctrl + Alt + D"""
+        """重試用完 F8 仍被占用 > 狀態列紅字引導用 Ctrl + Alt + D 快速列再按 Tab 開主視窗"""
         # Given: F8 被其他程式長期占用、沒有重試次數
         app = FakeRegistrar()
         register, _ = fake_register(occupied={F8_ID})
@@ -105,7 +105,7 @@ class RegisterHotkeyTest(unittest.TestCase):
             app._register_hotkey(retries=0)
         # Then: 不再重試，說明兩組功能的差別
         self.assertEqual(app.scheduled, [])
-        self.assertEqual(app.status, ("F8 已被其他程式占用，無法叫出快速列；主視窗仍可用 Ctrl + Alt + D 顯示／隱藏", True))
+        self.assertEqual(app.status, ("F8 已被其他程式占用；隱藏後請按 Ctrl + Alt + D 叫出快速列，再按 Tab 開啟主視窗", True))
 
     def test_all_occupied_after_retries(self):
         """重試用完兩組都被占用 > 狀態列紅字引導重新點 StartDayNote"""
@@ -123,13 +123,20 @@ class RegisterHotkeyTest(unittest.TestCase):
 class HotkeyStatusMessageTest(unittest.TestCase):
 
     def test_only_ctrl_alt_d_occupied(self):
-        """只有 Ctrl + Alt + D 被占用 > 引導用 F8 快速列再按 Tab 開主視窗"""
+        """只有 Ctrl + Alt + D 被占用 > 說明快速列不能用、主視窗仍可用 F8"""
         # Given: Ctrl + Alt + D 失敗
         failed = ["Ctrl + Alt + D"]
         # When: 產生提示
         text = daynote.hotkey_status_message(failed)
-        # Then: 指向 F8 → Tab
-        self.assertEqual(text, "Ctrl + Alt + D 已被其他程式占用；隱藏後請按 F8 叫出快速列，再按 Tab 開啟主視窗")
+        # Then: 指向 F8
+        self.assertEqual(text, "Ctrl + Alt + D 已被其他程式占用，無法叫出快速列；主視窗仍可用 F8 顯示／隱藏")
+
+    def test_actions_f8_window_ctrl_alt_d_quick_bar(self):
+        """快捷鍵動作 > F8 顯示／隱藏主視窗，Ctrl + Alt + D 叫出快速列"""
+        # Given / When: 動作對照
+        actions = daynote.HOTKEY_ACTIONS
+        # Then: 依使用者要求
+        self.assertEqual(actions, {F8_ID: "toggle_window", CTRL_ALT_D_ID: "quick_bar"})
 
 
 if __name__ == "__main__":
