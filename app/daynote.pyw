@@ -12,6 +12,7 @@ if sys.version_info < (3, 10):
 import base64
 import calendar
 import ctypes
+import dataclasses
 import datetime as dt
 import hashlib
 import http.server
@@ -147,6 +148,10 @@ class ConfigMissing(Exception):
 
 class ApiError(Exception):
     """可直接顯示給使用者的錯誤訊息。"""
+
+
+class NotFound(ApiError):
+    """Google 上找不到該資源（HTTP 404），例如任務已在其他裝置刪除。"""
 
 
 # ---------------------------------------------------------------- 設定與憑證
@@ -632,6 +637,8 @@ class Google:
             break
         error = data.get("error")
         message = error.get("message", "") if isinstance(error, dict) else ""
+        if status == 404:
+            raise NotFound(f"Google 上找不到這筆資料（HTTP 404）：{message}")
         raise ApiError(f"Google API 錯誤（HTTP {status}）：{message}")
 
     def _paged(self, url, params):
@@ -654,6 +661,22 @@ class Google:
         # showCompleted=false：不回傳已完成任務（已完成任務才會被隱藏，因此不需要 showHidden）
         return self._paged(f"{TASKS_API}/lists/{_q(list_id)}/tasks",
                            {"showCompleted": "false", "maxResults": 100})
+
+    def due_tasks(self, list_id, day):
+        """某日到期的所有任務（含已完成、隱藏、已刪除），供建立下一期前的防重複檢查。
+
+        實測：dueMax 不含邊界，[當日 00:00Z, 隔日 00:00Z) 剛好只回傳當日任務。
+        """
+        return self._paged(f"{TASKS_API}/lists/{_q(list_id)}/tasks", {
+            "showCompleted": "true", "showHidden": "true", "showDeleted": "true", "maxResults": 100,
+            "dueMin": f"{day.isoformat()}T00:00:00.000Z",
+            "dueMax": f"{(day + dt.timedelta(days=1)).isoformat()}T00:00:00.000Z"})
+
+    def completed_since(self, list_id, since):
+        """since（本機時間）之後完成的任務，含隱藏；供同步時補建手機上完成的週期任務。"""
+        return self._paged(f"{TASKS_API}/lists/{_q(list_id)}/tasks", {
+            "showCompleted": "true", "showHidden": "true", "maxResults": 100,
+            "completedMin": since.astimezone().isoformat()})
 
     def add_task(self, list_id, title, due, parent=None, notes=None):
         """新增工作；parent 指定時建立為該工作的子工作；notes 用來帶入「⏰ 時間」行。"""
@@ -691,26 +714,223 @@ class Google:
             "singleEvents": "true", "orderBy": "startTime", "maxResults": 250})
 
 
-# ---- 任務時間：Google Tasks API 不能存時間，改存在詳細資訊第一行「⏰ 15:00」（方案 B）
+# ---- 任務時間與週期：Google Tasks API 不能存時間與重複規則，改存在詳細資訊開頭
+#      「⏰ 15:00」「🔁 每週一」（方案 B）；手機上看得到，也可以直接在手機輸入
 
-_TIME_LINE = re.compile(r"^\s*⏰\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
+_TIME_LINE = re.compile(r"^\s*⏰️?\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
+_RECUR_LINE = re.compile(r"^\s*🔁️?\s*(.+?)\s*$")
+LAST_DAY = -1  # 每月最後一天
 
 
-def split_time_notes(notes):
-    """從詳細資訊拆出時間：回傳 (datetime.time 或 None, 去掉時間行的詳細資訊)。"""
+@dataclasses.dataclass(frozen=True)
+class Recur:
+    """重複規則。kind：daily／weekly／monthly／yearly。
+
+    weekdays 為 date.weekday() 的集合（0＝週一）；monthly 的 day 可為 LAST_DAY；yearly 使用 month＋day。
+    """
+    kind: str
+    weekdays: frozenset = frozenset()
+    day: int | None = None
+    month: int | None = None
+
+
+_WEEKDAY_CHARS = {c: i for i, c in enumerate(WEEKDAY_NAME)} | {"天": 6, "7": 6} | {str(i + 1): i for i in range(6)}
+_WEEKLY_RE = re.compile(r"^每(?:週|周|星期)(.+)$")
+_MONTHLY_RE = re.compile(r"^每月(\d{1,2})[日號]$")
+_YEARLY_RE = re.compile(r"^每年(\d{1,2})(?:/|月)(\d{1,2})日?$")
+_WEEKDAYS_MON_FRI = frozenset(range(5))
+
+
+def parse_recur(text):
+    """解析重複規則文字（每天、平日、每週一三五、每月15日、每月最後一天、每年3/15）。無法解析回傳 None。
+
+    第一版不支援「每 N 週」「每月第 N 個星期 X」。
+    """
+    text = (text or "").strip()
+    if text == "每天":
+        return Recur("daily")
+    if text == "平日":
+        return Recur("weekly", _WEEKDAYS_MON_FRI)
+    if text == "每月最後一天":
+        return Recur("monthly", day=LAST_DAY)
+    match = _WEEKLY_RE.match(text)
+    if match:
+        chars = re.sub(r"[\s、,，]", "", match.group(1))
+        if not chars or any(c not in _WEEKDAY_CHARS for c in chars):
+            return None
+        return Recur("weekly", frozenset(_WEEKDAY_CHARS[c] for c in chars))
+    match = _MONTHLY_RE.match(text)
+    if match:
+        day = int(match.group(1))
+        return Recur("monthly", day=day) if 1 <= day <= 31 else None
+    match = _YEARLY_RE.match(text)
+    if match:
+        month, day = int(match.group(1)), int(match.group(2))
+        try:
+            dt.date(2028, month, day)  # 以閏年驗證，2/29 合法
+        except ValueError:
+            return None
+        return Recur("yearly", day=day, month=month)
+    return None
+
+
+def format_recur(rule):
+    """重複規則的標準寫法（與 parse_recur 互為反函數）。"""
+    if rule.kind == "daily":
+        return "每天"
+    if rule.kind == "weekly":
+        if rule.weekdays == _WEEKDAYS_MON_FRI:
+            return "平日"
+        return "每週" + "".join(WEEKDAY_NAME[i] for i in sorted(rule.weekdays))
+    if rule.kind == "monthly":
+        return "每月最後一天" if rule.day == LAST_DAY else f"每月{rule.day}日"
+    return f"每年{rule.month}/{rule.day}"
+
+
+def split_meta(notes):
+    """從詳細資訊開頭拆出時間與重複規則：回傳 (time 或 None, Recur 或 None, 內文)。
+
+    ⏰、🔁 兩行順序不拘，各取第一行；遇到第一行非 metadata（含無效規則）即停止，該行起皆為內文。
+    """
     lines = (notes or "").split("\n")
-    match = _TIME_LINE.match(lines[0])
-    if not match:
-        return None, notes or ""
-    return dt.time(int(match.group(1)), int(match.group(2))), "\n".join(lines[1:]).lstrip("\n")
+    time_value, rule, index = None, None, 0
+    for line in lines:
+        time_match = _TIME_LINE.match(line)
+        recur_match = _RECUR_LINE.match(line)
+        if time_value is None and time_match:
+            time_value = dt.time(int(time_match.group(1)), int(time_match.group(2)))
+        elif rule is None and recur_match and parse_recur(recur_match.group(1)):
+            rule = parse_recur(recur_match.group(1))
+        else:
+            break
+        index += 1
+    if index == 0:
+        return None, None, notes or ""
+    return time_value, rule, "\n".join(lines[index:]).lstrip("\n")
 
 
-def join_time_notes(time_value, notes):
-    """把時間放回詳細資訊第一行；沒有時間就只回傳詳細資訊。"""
-    if not time_value:
-        return notes
-    head = f"⏰ {time_value:%H:%M}"
-    return f"{head}\n{notes}" if notes else head
+def join_meta(time_value, rule, body):
+    """把時間與重複規則放回詳細資訊開頭（固定 ⏰ 在前、🔁 在後）；都沒有時只回傳內文。"""
+    head = []
+    if time_value:
+        head.append(f"⏰ {time_value:%H:%M}")
+    if rule:
+        head.append(f"🔁 {format_recur(rule)}")
+    return "\n".join(head + ([body] if body else [])) if head else body
+
+
+def _matches(rule, day):
+    if rule.kind == "daily":
+        return True
+    if rule.kind == "weekly":
+        return day.weekday() in rule.weekdays
+    month_len = calendar.monthrange(day.year, day.month)[1]
+    target = month_len if rule.day == LAST_DAY else min(rule.day, month_len)  # 小月退到月底
+    if rule.kind == "monthly":
+        return day.day == target
+    return day.month == rule.month and day.day == target
+
+
+def next_due(rule, base, today):
+    """下一期日期：原定日期（無日期時用今天）之後第一個符合規則的日子；早於今天就繼續往後推，不補出過期各期。"""
+    start = max((base or today) + dt.timedelta(days=1), today)
+    for offset in range(366 * 2):
+        day = start + dt.timedelta(days=offset)
+        if _matches(rule, day):
+            return day
+    raise ValueError(f"找不到符合規則的日期：{rule}")
+
+
+def next_task_for(task, today):
+    """完成或略過一筆任務後要建立的下一期內容；不是週期父工作時回傳 None。"""
+    if not task.get("recur") or task.get("parent"):
+        return None
+    return {"list_id": task["list_id"], "title": task["title"],
+            "due": next_due(task["recur"], task["due"], today),
+            "notes": join_meta(task.get("time"), task["recur"], task.get("notes", ""))}
+
+
+def can_skip(task):
+    """「略過這一期」只提供給週期父工作（子工作不支援週期）。"""
+    return bool(task.get("recur")) and not task.get("parent")
+
+
+def find_successor(candidates, task, due, include_deleted=False):
+    """在 Google 上的任務（API 格式）中找已存在的下一期：同標題、同規則、同日期的最上層任務。
+
+    已完成的也算；已刪除的只有 include_deleted 時才算（同步補建用：刪掉下一期代表結束週期）。
+    """
+    for raw in candidates:
+        if raw.get("id") == task["id"] or raw.get("parent"):
+            continue
+        if raw.get("deleted") and not include_deleted:
+            continue
+        if (raw.get("title") or "") != task["title"] or task_due(raw) != due:
+            continue
+        if split_meta(raw.get("notes"))[1] == task["recur"]:
+            return raw
+    return None
+
+
+def spawn_next(google, task, plan, include_deleted=False):
+    """（背景執行緒）依 plan 建立下一期；Google 上已有下一期時不建立並回傳 None，否則回傳新任務。"""
+    if find_successor(google.due_tasks(task["list_id"], plan["due"]), task, plan["due"], include_deleted):
+        return None
+    created = google.add_task(plan["list_id"], plan["title"], plan["due"], notes=plan["notes"])
+    return {"id": created["id"], "title": created.get("title") or plan["title"],
+            "list_id": task["list_id"], "list_title": task.get("list_title", ""),
+            "due": task_due(created) or plan["due"], "parent": None, "time": task.get("time"),
+            "recur": task["recur"], "notes": task.get("notes", ""), "position": created.get("position", "")}
+
+
+def reminder_key(task_id, when):
+    """已提醒記錄的鍵：任務 id＋提醒時間（重開 DayNote 不重複提醒）。"""
+    return f"{task_id}@{when:%Y-%m-%dT%H:%M}"
+
+
+def mark_past_reminder(reminded, task, now):
+    """新建的一期若提醒時間已過，直接記為已提醒，避免剛完成就跳出同一件事的提醒。有標記時回傳 True。"""
+    if not (task.get("time") and task.get("due")):
+        return False
+    when = dt.datetime.combine(task["due"], task["time"])
+    if when > now:
+        return False
+    reminded.add(reminder_key(task["id"], when))
+    return True
+
+
+def delete_prompt(task, child_count):
+    """刪除確認文字；週期任務會提醒「不會再產生下一期」並引導改用略過。"""
+    extra = f"\n（含 {child_count} 個子工作）" if child_count else ""
+    text = f"確定要刪除「{task['title']}」？{extra}\n\n刪除後無法在 DayNote 復原。"
+    if can_skip(task):
+        text = (f"這是重複任務（🔁 {format_recur(task['recur'])}），刪除後不會再產生下一期。\n"
+                f"只想跳過這次，請改用「略過這一期」。\n\n{text}")
+    return text
+
+
+def task_subtitle(task, today):
+    """列表卡片的副標題：逾期／時間、週期、清單名稱。"""
+    due, at = task["due"], time_text(task.get("time"))
+    parts = []
+    if due is not None and due < today:
+        parts.append(f"已逾期 · {due.month}月{due.day}日{' ' + at if at else ''}")
+    elif at:
+        parts.append(f"⏰ {at}")
+    if task.get("recur"):
+        parts.append(f"🔁 {format_recur(task['recur'])}")
+    parts.append(task["list_title"])
+    return " · ".join(parts)
+
+
+def apply_fields(task, fields):
+    """把 API 欄位格式的修改（title／notes／due）套用到畫面上的任務。"""
+    if "title" in fields:
+        task["title"] = fields["title"]
+    if "notes" in fields:
+        task["time"], task["recur"], task["notes"] = split_meta(fields["notes"])
+    if "due" in fields:
+        task["due"] = task_due({"due": fields["due"]})
 
 
 def parse_time_text(text):
@@ -822,6 +1042,38 @@ def event_days(event):
         return [(first + dt.timedelta(days=i), "全天") for i in range(max((last - first).days, 1))]
     begin = dt.datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00")).astimezone()
     return [(begin.date(), begin.strftime("%H:%M"))]
+
+
+def backfill_recurring(google, lists, since, today):
+    """（背景執行緒）補建 since 之後在其他裝置（手機）完成、但還沒有下一期的週期任務。
+
+    已刪除的下一期也算存在（使用者刪掉下一期 = 結束週期）。回傳 (新建任務, 是否全部成功)。
+    """
+    spawned, ok = [], True
+    for lst in lists:
+        try:
+            completed = google.completed_since(lst["id"], since)
+        except ApiError:
+            ok = False
+            continue
+        for raw in completed:
+            if raw.get("parent") or raw.get("deleted"):
+                continue
+            time_value, rule, body = split_meta(raw.get("notes"))
+            if not rule:
+                continue
+            task = {"id": raw["id"], "title": raw.get("title") or "", "list_id": lst["id"],
+                    "list_title": lst.get("title", ""), "due": task_due(raw), "parent": None,
+                    "time": time_value, "recur": rule, "notes": body}
+            try:
+                created = spawn_next(google, task, next_task_for(task, today), include_deleted=True)
+            except ApiError:
+                ok = False
+                continue
+            if created:
+                created["backfilled"] = True
+                spawned.append(created)
+    return spawned, ok
 
 
 # ---------------------------------------------------------------- 畫面
@@ -1031,6 +1283,55 @@ class TimePicker(_Popup):
         self.pick(value)
 
 
+class RecurPicker(_Popup):
+    """重複規則選擇器：依起始日期提供常用規則＋自訂（例如「每週一三五」，Enter 確認）＋不重複。"""
+
+    def __init__(self, app, anchor, current, base, on_pick):
+        self.on_pick = on_pick
+        self.current = current
+        self.base = base
+        super().__init__(app, anchor)
+
+    def _options(self):
+        base = self.base
+        options = ["每天", "平日", f"每週{WEEKDAY_NAME[base.weekday()]}", f"每月{base.day}日"]
+        if base.day == calendar.monthrange(base.year, base.month)[1]:
+            options.append("每月最後一天")
+        options.append(f"每年{base.month}/{base.day}")
+        return [parse_recur(text) for text in options]
+
+    def _render(self):
+        for w in self.body.winfo_children():
+            w.destroy()
+        tk.Label(self.body, text="重複（依起始日期）", bg=CARD_BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
+        for rule in self._options():
+            selected = rule == self.current
+            lbl = tk.Label(self.body, text=format_recur(rule), bg=ACCENT if selected else CARD_BG,
+                           fg="white" if selected else TEXT, font=FONT, cursor="hand2", anchor="w",
+                           padx=px(6), pady=px(2))
+            lbl.pack(fill="x", pady=px(1))
+            lbl.bind("<Button-1>", lambda e, r=rule: self.pick(r))
+        row = tk.Frame(self.body, bg=CARD_BG)
+        row.pack(fill="x", pady=(px(4), px(2)))
+        tk.Label(row, text="自訂", bg=CARD_BG, fg=GRAY, font=SMALL).pack(side="left")
+        self.custom = tk.Entry(row, width=12, font=FONT, relief="flat", bg=BG, fg=TEXT, insertbackground=TEXT,
+                               highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+        self.custom.insert(0, format_recur(self.current) if self.current else "")
+        self.custom.pack(side="left", padx=px(6))
+        self.custom.bind("<Return>", lambda e: self._pick_custom())
+        self._link(row, "確定", self._pick_custom).pack(side="left")
+        self.hint = tk.Label(self.body, text="", bg=CARD_BG, fg=RED, font=SMALL, anchor="w", justify="left")
+        self.hint.pack(fill="x")
+        self._link(self.body, "不重複", lambda: self.pick(None), fg=GRAY).pack(anchor="w")
+
+    def _pick_custom(self):
+        rule = parse_recur(self.custom.get())
+        if rule is None:
+            self.hint.config(text="例如：每天、平日、每週一三五、\n每月15日、每月最後一天、每年3/15")
+            return
+        self.pick(rule)
+
+
 def win_work_area():
     """主螢幕扣掉工作列的可用範圍 (left, top, right, bottom)；取不到時回傳 None。"""
     try:
@@ -1208,6 +1509,9 @@ class App(tk.Tk):
         self.reminded = set(self.state_data.get("reminded", []))  # 已提醒過的「任務@時間」
         self.snoozed = {k: dt.datetime.fromisoformat(v) for k, v in self.state_data.get("snoozed", {}).items()}
         self.detail = None          # 詳細頁編輯中的工作與欄位
+        self.undo_spawned = None    # 完成時建立的下一期（復原時一併刪除）
+        since = self.state_data.get("backfill_since")
+        self.backfill_since = dt.datetime.fromisoformat(since) if since else None  # 同步補建的檢查時間點
 
         self._build()
         self.redraw()
@@ -1370,7 +1674,10 @@ class App(tk.Tk):
         else:
             self.iconify()
 
-    def close(self):
+    def close(self, ask=True):
+        """關閉 DayNote；詳細頁有未儲存的修改時先處理（ask=False：不詢問直接儲存，用於被新開的 DayNote 取代）。"""
+        if not self._flush_detail_on_close(ask):
+            return
         state = dict(self.state_data, topmost=self.topmost, scale=SCALE)
         if self.winfo_x() > -30000:  # 縮小中 Windows 回報 -32000，此時沿用上次存的位置
             state.update(x=self.winfo_x(), y=self.winfo_y(),
@@ -1381,6 +1688,33 @@ class App(tk.Tk):
         if getattr(self, "_poll_job", None):
             self.after_cancel(self._poll_job)
         self.destroy()
+
+    def _flush_detail_on_close(self, ask=True):
+        """關閉前若詳細頁有未儲存的修改：詢問儲存／不儲存／取消。可以繼續關閉時回傳 True。
+
+        儲存必須同步送出：背景執行緒是 daemon，程式結束時會被中止，修改可能根本沒送到 Google。
+        """
+        if not self.detail:
+            return True
+        fields = self._detail_changes()
+        if not fields:
+            return True
+        task = self.detail["task"]
+        if ask:
+            answer = messagebox.askyesnocancel(
+                "尚未儲存", f"「{task['title']}」有尚未儲存的修改，要先儲存再關閉嗎？", parent=self, icon="warning")
+            if answer is None:
+                return False
+            if not answer:
+                return True
+        try:
+            self.g.update_task(task["list_id"], task["id"], fields)
+        except (ApiError, NeedLogin) as e:
+            if not ask:
+                return True  # 被取代時無法詢問，只能放棄這次修改
+            messagebox.showerror("儲存失敗", f"{e}\n\n修改尚未儲存，DayNote 先不關閉。", parent=self)
+            return False
+        return True
 
     def _icon_button(self, parent, text, command, font=ICON_FONT, tip=None):
         """扁平小按鈕（Label 實作，比 ttk.Button 窄，頂部列才放得下）。"""
@@ -1677,12 +2011,7 @@ class App(tk.Tk):
 
     def _task_with_children(self, task):
         overdue = task["due"] is not None and task["due"] < self.today
-        due, at = task["due"], time_text(task.get("time"))
-        if overdue:
-            subtitle = f"已逾期 · {due.month}月{due.day}日{' ' + at if at else ''} · {task['list_title']}"
-        else:
-            subtitle = f"⏰ {at} · {task['list_title']}" if at else task["list_title"]
-        self._card(task["title"], subtitle, task, subtitle_fg=RED if overdue else GRAY)
+        self._card(task["title"], task_subtitle(task, self.today), task, subtitle_fg=RED if overdue else GRAY)
         for child in self._children(task):
             # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示；有時間才顯示
             child_at = time_text(child.get("time"))
@@ -1796,7 +2125,7 @@ class App(tk.Tk):
         if self.detail:
             self.close_detail()  # 從子工作切換時，先儲存目前這筆
         task = self._find_task(task["id"]) or task
-        self.detail = {"task": task, "due": task["due"], "time": task.get("time")}
+        self.detail = {"task": task, "due": task["due"], "time": task.get("time"), "recur": task.get("recur")}
         self._hide_undo()
         self.main_view.pack_forget()
         self._render_detail()
@@ -1812,7 +2141,7 @@ class App(tk.Tk):
 
         bar = tk.Frame(view, bg=BG)
         bar.pack(fill="x", pady=(px(6), px(4)), **pad)
-        self._icon_button(bar, "← 返回", self.close_detail, font=FONT, tip="儲存並返回（Esc）").pack(side="left")
+        self._icon_button(bar, "← 儲存並返回", self.close_detail, font=FONT, tip="儲存並返回（Esc）").pack(side="left")
         btn_delete = self._icon_button(bar, "刪除", self.delete_detail, font=FONT, tip="刪除這筆工作")
         btn_delete.config(fg=RED)
         btn_delete.bind("<Leave>", lambda e: btn_delete.config(fg=RED), add="+")
@@ -1845,6 +2174,17 @@ class App(tk.Tk):
                             cursor="hand2", padx=px(8), pady=px(2), highlightthickness=1, highlightbackground=BORDER)
         btn_time.pack(side="left")
         btn_time.bind("<Button-1>", lambda e: TimePicker(self, btn_time, self.detail["time"], self._set_detail_time))
+        if not task.get("parent"):  # 子工作不支援週期
+            row_recur = tk.Frame(view, bg=BG)
+            row_recur.pack(fill="x", pady=(px(6), 0), **pad)
+            tk.Label(row_recur, text="重複", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
+            rule = self.detail["recur"]
+            btn_recur = tk.Label(row_recur, text=f"🔁 {format_recur(rule)} ▾" if rule else "🔁 不重複 ▾",
+                                 bg=CARD_BG, fg=ACCENT, font=FONT, cursor="hand2", padx=px(8), pady=px(2),
+                                 highlightthickness=1, highlightbackground=BORDER)
+            btn_recur.pack(side="left", padx=px(8))
+            btn_recur.bind("<Button-1>", lambda e: RecurPicker(
+                self, btn_recur, self.detail["recur"], self.detail["due"] or dt.date.today(), self._set_detail_recur))
         if task.get("parent"):
             tk.Label(view, text="（這是子工作，在主畫面會顯示在父工作下方）", bg=BG, fg=GRAY, font=SMALL,
                      anchor="w").pack(fill="x", pady=(px(4), 0), **pad)
@@ -1857,6 +2197,17 @@ class App(tk.Tk):
                         padx=px(12), pady=px(4))
         done.pack(side="right")
         done.bind("<Button-1>", lambda e: self.complete_detail())
+        save = tk.Label(foot, text="儲存", bg=CARD_BG, fg=ACCENT, font=FONT, cursor="hand2",
+                        padx=px(10), pady=px(4), highlightthickness=1, highlightbackground=BORDER)
+        save.pack(side="right", padx=(0, px(6)))
+        save.bind("<Button-1>", lambda e: self.close_detail())
+        Tooltip(save, "儲存修改並返回（Esc）")
+        if not task.get("parent") and self.detail["recur"]:
+            skip = tk.Label(foot, text="略過這一期", bg=CARD_BG, fg=ACCENT, font=FONT, cursor="hand2",
+                            padx=px(10), pady=px(4), highlightthickness=1, highlightbackground=BORDER)
+            skip.pack(side="right", padx=(0, px(6)))
+            skip.bind("<Button-1>", lambda e: self.skip_detail())
+            Tooltip(skip, "這次不做：建立下一期並刪除這一期，不留完成紀錄")
         for widget in (self.detail_title, self.detail_notes):
             widget.bind("<Escape>", lambda e: self.close_detail())
 
@@ -1894,7 +2245,14 @@ class App(tk.Tk):
     def _set_detail_due(self, day):
         self.detail["due"] = day
         if day is None:
-            self.detail["time"] = None  # 沒有日期就不能提醒
+            self.detail["time"] = None   # 沒有日期就不能提醒
+            self.detail["recur"] = None  # 也不能重複
+        self._rerender_detail()
+
+    def _set_detail_recur(self, rule):
+        self.detail["recur"] = rule
+        if rule and self.detail["due"] is None:  # 重複需要起始日期；沒有日期時預設今天
+            self.detail["due"] = dt.date.today()
         self._rerender_detail()
 
     def _set_detail_time(self, value):
@@ -1911,29 +2269,27 @@ class App(tk.Tk):
         if title and title != task["title"]:
             fields["title"] = title
         notes = self.detail_notes.get("1.0", "end-1c")
-        if notes != task.get("notes", "") or self.detail["time"] != task.get("time"):
-            fields["notes"] = join_time_notes(self.detail["time"], notes)  # 時間寫回詳細資訊第一行
+        # 比對拆解後的值（而非原始字串），手機上 🔁／⏰ 順序不同但內容未改時不會送出 PATCH
+        if (notes != task.get("notes", "") or self.detail["time"] != task.get("time")
+                or self.detail.get("recur") != task.get("recur")):
+            fields["notes"] = join_meta(self.detail["time"], self.detail.get("recur"), notes)
         if self.detail["due"] != task["due"]:
             due = self.detail["due"]
             fields["due"] = f"{due.isoformat()}T00:00:00.000Z" if due else None
         return fields
 
-    def close_detail(self):
-        """返回主畫面；有修改就自動儲存（比照手機 App，不需要按儲存）。"""
+    def close_detail(self, save=True):
+        """返回主畫面；有修改就自動儲存（比照手機 App，不需要按儲存）。save=False 時只關閉、不送出修改。"""
         if not self.detail:
             return
         task = self.detail["task"]
-        fields = self._detail_changes()
+        fields = self._detail_changes() if save else {}
         self.detail = None
         self.detail_view.pack_forget()
         self.main_view.pack(fill="both", expand=True)
         if fields:
             before = dict(task)
-            task.update({k: v for k, v in fields.items() if k not in ("due", "notes")})
-            if "notes" in fields:
-                task["time"], task["notes"] = split_time_notes(fields["notes"])
-            if "due" in fields:
-                task["due"] = task_due({"due": fields["due"]})
+            apply_fields(task, fields)
             self._set_status("儲存中…")
 
             def done(_, err):
@@ -1951,12 +2307,17 @@ class App(tk.Tk):
         self.close_detail()
         self.complete(task)
 
+    def skip_detail(self):
+        """詳細頁的「略過這一期」：修改只套用在下一期，不對即將刪除的這一期送出 PATCH（避免與刪除競態）。"""
+        task = self.detail["task"]
+        apply_fields(task, self._detail_changes())
+        self.close_detail(save=False)
+        self.skip(task)
+
     def delete_detail(self):
         task = self.detail["task"]
         children = [] if task.get("parent") else self._children(task)
-        extra = f"\n（含 {len(children)} 個子工作）" if children else ""
-        if not messagebox.askyesno("刪除工作", f"確定要刪除「{task['title']}」？{extra}\n\n刪除後無法在 DayNote 復原。",
-                                   parent=self, icon="warning"):
+        if not messagebox.askyesno("刪除工作", delete_prompt(task, len(children)), parent=self, icon="warning"):
             return
         self.detail = None
         self.detail_view.pack_forget()
@@ -1990,7 +2351,7 @@ class App(tk.Tk):
                 return
             self.tasks.append({"id": created["id"], "title": created.get("title") or title,
                                "list_id": lst["id"], "list_title": lst["title"], "due": task_due(created),
-                               "parent": parent["id"], "notes": "", "time": None,
+                               "parent": parent["id"], "notes": "", "time": None, "recur": None,
                                "position": created.get("position", "")})
             self._set_status(f"已新增子工作「{title}」")
             if self.detail and self.detail["task"]["id"] == parent["id"]:
@@ -2118,7 +2479,7 @@ class App(tk.Tk):
             if not (task.get("time") and task["due"]):
                 continue
             when = dt.datetime.combine(task["due"], task["time"])
-            key = f"{task['id']}@{when:%Y-%m-%dT%H:%M}"
+            key = reminder_key(task["id"], when)
             if key in self.reminded:
                 continue
             fire_at = self.snoozed.get(key, when)
@@ -2158,7 +2519,7 @@ class App(tk.Tk):
         if still_mine:
             self.after(1000, self._watch_pid)
         else:
-            self.close()
+            self.close(ask=False)
 
     def _bind_shortcuts(self):
         """Ctrl+N 新增、←→ 前後一天、↑↓ 前後一週、Home 今天、F5 同步、Esc 離開輸入框。"""
@@ -2247,7 +2608,11 @@ class App(tk.Tk):
         self.run_bg(lambda: self._load(view), self._after_load)
 
     def _load(self, view):
-        """（背景執行緒）讀取清單、所有未完成任務，以及顯示月份前後的日曆事件。"""
+        """（背景執行緒）讀取清單、所有未完成任務，以及顯示月份前後的日曆事件。
+
+        同時補建手機上完成的週期任務；回傳的最後一項為下次補建檢查的時間點。
+        """
+        now = self._now()
         lists = self.g.tasklists()
         tasks = []
         for lst in lists:
@@ -2257,7 +2622,7 @@ class App(tk.Tk):
                 tasks.append({"id": t["id"], "title": t.get("title") or "（無標題）",
                               "list_id": lst["id"], "list_title": lst.get("title", ""),
                               "due": task_due(t), "parent": t.get("parent"),
-                              **dict(zip(("time", "notes"), split_time_notes(t.get("notes", "")))),
+                              **dict(zip(("time", "recur", "notes"), split_meta(t.get("notes", "")))),
                               "position": t.get("position", "")})
         year, month = view
         first = dt.date(year, month, 1)
@@ -2268,7 +2633,12 @@ class App(tk.Tk):
         for ev in self.g.events(start, end):
             for day, when in event_days(ev):
                 events.setdefault(day, []).append((when, ev.get("summary") or "（無標題）"))
-        return view, lists, tasks, events, self._load_holidays(start, end)
+        mark = now
+        if self.backfill_since is not None:  # 第一次同步只記錄時間點，不回溯歷史
+            spawned, ok = backfill_recurring(self.g, lists, self.backfill_since, now.date())
+            tasks.extend(spawned)
+            mark = now if ok else self.backfill_since  # 有失敗就不前進，下次重試（防重複確保不會多建）
+        return view, lists, tasks, events, self._load_holidays(start, end), mark
 
     def _load_holidays(self, start, end):
         """（背景執行緒）讀取節慶假日。失敗只是不顯示節日，不影響任務同步。
@@ -2293,7 +2663,13 @@ class App(tk.Tk):
         if err:
             self._show_error(err)
             return
-        view, self.lists, self.tasks, self.events, self.holidays = result
+        view, self.lists, self.tasks, self.events, self.holidays, mark = result
+        self.backfill_since = mark
+        self.state_data["backfill_since"] = mark.isoformat()
+        save_state(self.state_data)
+        backfilled = [t for t in self.tasks if t.pop("backfilled", False)]
+        if any([mark_past_reminder(self.reminded, t, self._now()) for t in backfilled]):
+            self._save_reminder_state()
         self._show_login_button(False)
         self._refresh_list_values()
         list_ids = [lst["id"] for lst in self.lists]
@@ -2317,26 +2693,97 @@ class App(tk.Tk):
         group = [task] + self._children(task)
         for t in group:  # 先從畫面移除，失敗再放回
             self.tasks.remove(t)
-        self.redraw()
+        self.redraw()  # 也會更新 self.today，之後才計算下一期
+        plan = next_task_for(task, self.today)
 
         def work():
             for t in group:
                 self.g.complete_task(t["list_id"], t["id"])
+            if not plan:
+                return None, None
+            try:
+                return spawn_next(self.g, task, plan), None
+            except (ApiError, NeedLogin) as e:  # 完成已成功，下一期失敗不回滾
+                return None, e
 
-        def done(_, err):
+        def done(result, err):
             if err:
                 # 可能已部分完成；先放回畫面並顯示錯誤，下次同步會以 Google 上的實際狀態為準
                 self.tasks.extend(group)
                 self.redraw()
                 self._show_error(err)
                 return
-            self._offer_undo(group)
+            spawned, spawn_err = result
+            self._add_spawned(spawned)
+            warning = f"已完成「{task['title']}」，但下一期建立失敗：{spawn_err}" if spawn_err else None
+            self._offer_undo(group, [spawned] if spawned else [], warning)
         self.run_bg(work, done)
 
-    def _offer_undo(self, group):
-        """在狀態列顯示「已完成…　復原」，UNDO_SECONDS 秒後自動收起。"""
-        self._set_status(f"已完成「{group[0]['title']}」")
+    def _add_spawned(self, spawned):
+        """把新建的下一期放進畫面；同步可能已先讀到同一筆，依 id 避免重複。提醒時間已過就不再跳。"""
+        if not spawned:
+            return
+        if spawned["id"] not in {t["id"] for t in self.tasks}:
+            self.tasks.append(spawned)
+        if mark_past_reminder(self.reminded, spawned, self._now()):
+            self._save_reminder_state()
+        self.redraw()
+
+    def _now(self):
+        return dt.datetime.now()
+
+    def skip(self, task):
+        """略過這一期：先建立下一期、再刪除這一期，不留完成紀錄。失敗時寧可多一筆，不讓週期中斷。"""
+        if not can_skip(task) or task not in self.tasks:
+            return
+        children = self._children(task)
+        if children and not messagebox.askyesno(
+                "略過這一期", f"略過「{task['title']}」這一期？\n（含 {len(children)} 個子工作，會一併刪除）",
+                parent=self, icon="question"):
+            return
+        group = children + [task]  # 先刪子工作再刪父工作
+        for t in group:
+            self.tasks.remove(t)
+        self.redraw()
+        plan = next_task_for(task, self.today)
+
+        def work():
+            spawned = spawn_next(self.g, task, plan)  # 失敗就直接丟出，這一期不刪
+            try:
+                for t in group:
+                    try:
+                        self.g.delete_task(t["list_id"], t["id"])
+                    except NotFound:
+                        pass  # 已在其他裝置刪除（例如另一台已略過）
+            except (ApiError, NeedLogin) as e:
+                return spawned, e
+            return spawned, None
+
+        def done(result, err):
+            if err:
+                self.tasks.extend(group)
+                self.redraw()
+                self._show_error(err)
+                return
+            spawned, delete_err = result
+            self._add_spawned(spawned)
+            if delete_err:
+                self.tasks.extend(t for t in group if t not in self.tasks)
+                self.redraw()
+                self._set_status(f"已建立下一期，但這一期刪除失敗，請手動刪除「{task['title']}」", error=True)
+                return
+            skipped = f" {task['due'].month}/{task['due'].day}" if task["due"] else ""
+            self._set_status(f"已略過{skipped}，下一期 {plan['due'].month}/{plan['due'].day}")
+        self.run_bg(work, done)
+
+    def _offer_undo(self, group, spawned=(), warning=None):
+        """在狀態列顯示「已完成…　復原」，UNDO_SECONDS 秒後自動收起。
+
+        spawned 為這次完成所建立的下一期（復原時一併刪除）；warning 有值時以紅字取代完成訊息，復原按鈕照常提供。
+        """
+        self._set_status(warning or f"已完成「{group[0]['title']}」", error=bool(warning))
         self.undo_group = group
+        self.undo_spawned = list(spawned)
         self.btn_undo.pack(side="right", padx=px(4), before=self.status)
         self.undo_job = self.after(UNDO_SECONDS * 1000, self._hide_undo)
 
@@ -2345,28 +2792,43 @@ class App(tk.Tk):
             self.after_cancel(self.undo_job)
             self.undo_job = None
         self.undo_group = None
+        self.undo_spawned = None
         self.btn_undo.pack_forget()
 
     def undo_complete(self):
-        group = self.undo_group
+        group, spawned = self.undo_group, list(self.undo_spawned or [])
         if not group:
             return
         self._hide_undo()
         self.tasks.extend(group)
+        for s in spawned:
+            if s in self.tasks:
+                self.tasks.remove(s)
         self._set_status(f"已復原「{group[0]['title']}」")
         self.redraw()
 
         def work():
             for t in group:
                 self.g.uncomplete_task(t["list_id"], t["id"])
+            try:
+                for s in spawned:  # 刪除這次完成所建立的下一期
+                    try:
+                        self.g.delete_task(s["list_id"], s["id"])
+                    except NotFound:
+                        pass  # 下一期已被刪除，視為成功
+            except (ApiError, NeedLogin) as e:
+                return e
+            return None
 
-        def done(_, err):
+        def done(delete_err, err):
             if err:
                 for t in group:
                     if t in self.tasks:
                         self.tasks.remove(t)
                 self.redraw()
                 self._show_error(err)
+            elif delete_err:
+                self._show_error(delete_err)  # 原任務已復原；下一期可能還在，下次同步以 Google 為準
         self.run_bg(work, done)
 
     def add_task(self):
@@ -2395,12 +2857,13 @@ class App(tk.Tk):
             self.tasks.append({"id": created["id"], "title": created.get("title") or title,
                                "list_id": lst["id"], "list_title": lst.get("title", ""),
                                "due": task_due(created), "parent": None, "notes": "", "time": time_value,
+                               "recur": None,
                                "position": created.get("position", "")})
             self.new_time = None  # 時間只套用在這一筆
             when = f"，{time_text(time_value)} 提醒" if time_value else ""
             self._set_status(f"已新增到「{lst.get('title', '')}」{when}")
             self.redraw()
-        notes = join_time_notes(time_value, "")
+        notes = join_meta(time_value, None, "")
         self.run_bg(lambda: self.g.add_task(lst["id"], title, due, notes=notes or None), done)
 
     # ---- 執行緒
