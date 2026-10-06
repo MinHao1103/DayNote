@@ -311,16 +311,21 @@ _WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint, wi
 
 
 WM_HOTKEY = 0x0312
-HOTKEY_ID = 1
 MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
-VK_D = 0x44
+VK_D, VK_F8 = 0x44, 0x77
+# 全域快捷鍵：(id, 修飾鍵, 按鍵, 顯示名稱)。F8 為主；保留 Ctrl + Alt + D 給舊使用者，也當 F8 被占用時的備援
+HOTKEYS = (
+    (1, MOD_NOREPEAT, VK_F8, "F8"),
+    (2, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_D, "Ctrl + Alt + D"),
+)
+HOTKEY_IDS = {hk[0] for hk in HOTKEYS}
 
 
 def win_hook_messages(widget, on_user_minimize=None, on_hotkey=None):
     """攔截視窗訊息，原封不動交給 tkinter 處理，只額外通知：
 
     - SC_MINIMIZE：使用者點工作列（或 Win + ↓）要求縮小；Win + D 不會送這個
-    - WM_HOTKEY：全域快捷鍵（Ctrl + Alt + D）
+    - WM_HOTKEY：全域快捷鍵（F8、Ctrl + Alt + D）
     回呼裡不可直接操作 tkinter，請只排入佇列。回傳要保留的 callback 參考；失敗回傳 None。
     """
     try:
@@ -334,7 +339,7 @@ def win_hook_messages(widget, on_user_minimize=None, on_hotkey=None):
         def proc(h, msg, wparam, lparam):
             if msg == WM_SYSCOMMAND and (wparam & 0xFFF0) == SC_MINIMIZE and on_user_minimize:
                 on_user_minimize()
-            elif msg == WM_HOTKEY and wparam == HOTKEY_ID and on_hotkey:
+            elif msg == WM_HOTKEY and wparam in HOTKEY_IDS and on_hotkey:
                 on_hotkey()
             return user32.CallWindowProcW(state["old"], h, msg, wparam, lparam)
 
@@ -345,23 +350,32 @@ def win_hook_messages(widget, on_user_minimize=None, on_hotkey=None):
         return None
 
 
-def win_register_hotkey(widget):
-    """註冊全域快捷鍵 Ctrl + Alt + D；被其他程式占用時回傳 False。"""
+def win_register_hotkey(widget, hotkey_id):
+    """註冊 HOTKEYS 中指定 id 的全域快捷鍵；被其他程式占用時回傳 False。"""
     try:
         user32 = ctypes.WinDLL("user32")
         user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
-        return bool(user32.RegisterHotKey(_hwnd(widget), HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_D))
+        _, mods, vk, _ = next(hk for hk in HOTKEYS if hk[0] == hotkey_id)
+        return bool(user32.RegisterHotKey(_hwnd(widget), hotkey_id, mods, vk))
     except (OSError, AttributeError):
         return False
 
 
-def win_unregister_hotkey(widget):
+def win_unregister_hotkey(widget, hotkey_id):
     try:
         user32 = ctypes.WinDLL("user32")
         user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.UnregisterHotKey(_hwnd(widget), HOTKEY_ID)
+        user32.UnregisterHotKey(_hwnd(widget), hotkey_id)
     except (OSError, AttributeError):
         pass
+
+
+def hotkey_status_message(failed):
+    """依註冊失敗的快捷鍵名稱，產生狀態列提示；還有能用的就引導改用它。"""
+    usable = [name for _, _, _, name in HOTKEYS if name not in failed]
+    if usable:
+        return f"{'、'.join(failed)} 已被其他程式占用，請改用 {'、'.join(usable)} 叫出 DayNote"
+    return f"{' 和 '.join(failed)} 都已被其他程式占用；隱藏後請再點 StartDayNote 叫回"
 
 
 def win_set_background_window(widget):
@@ -1480,7 +1494,7 @@ class App(tk.Tk):
         # 背景模式（預設）：不顯示工作列圖示；只有無邊框時可用，一般視窗維持系統預設
         self.show_in_taskbar = show_in_taskbar or not borderless
         self.in_taskbar = not borderless
-        self.hotkey_ok = False
+        self.hotkeys_registered = set()  # 已註冊成功的 HOTKEYS id
         self.topmost = bool(self.state_data.get("topmost", False))
         self._drag_offset = None
         self._resize_start = None
@@ -1578,7 +1592,7 @@ class App(tk.Tk):
         self._install_hooks()
 
     def _install_hooks(self):
-        """攔截視窗訊息並註冊 Ctrl + Alt + D。回呼只排入佇列，由主執行緒切換顯示。"""
+        """攔截視窗訊息並註冊 F8 與 Ctrl + Alt + D。回呼只排入佇列，由主執行緒切換顯示。"""
         if getattr(self, "_message_hook", None):
             return
         self._message_hook = win_hook_messages(
@@ -1588,17 +1602,20 @@ class App(tk.Tk):
             self._register_hotkey(retries=6)
 
     def _register_hotkey(self, retries):
-        """註冊 Ctrl + Alt + D。重新啟動時舊的 DayNote 最多 1 秒後才關閉並釋放快捷鍵，所以失敗會每秒重試。"""
-        self.hotkey_ok = win_register_hotkey(self)
-        if self.hotkey_ok:
+        """註冊 HOTKEYS 中尚未成功的快捷鍵。重新啟動時舊的 DayNote 最多 1 秒後才關閉並釋放快捷鍵，所以失敗會每秒重試。"""
+        for hotkey_id, _, _, _ in HOTKEYS:
+            if hotkey_id not in self.hotkeys_registered and win_register_hotkey(self, hotkey_id):
+                self.hotkeys_registered.add(hotkey_id)
+        failed = [name for hotkey_id, _, _, name in HOTKEYS if hotkey_id not in self.hotkeys_registered]
+        if not failed:
             return
         if retries:
             self.after(1000, lambda: self._register_hotkey(retries - 1))
         else:
-            self._set_status("Ctrl + Alt + D 已被其他程式占用；隱藏後請再點 StartDayNote.bat 叫回", error=True)
+            self._set_status(hotkey_status_message(failed), error=True)
 
     def toggle_visible(self):
-        """Ctrl + Alt + D：隱藏中就叫回來並放到最前面，顯示中就隱藏。"""
+        """F8 或 Ctrl + Alt + D：隱藏中就叫回來並放到最前面，顯示中就隱藏。"""
         if self.state() == "withdrawn":
             self.deiconify()
             self.lift()
@@ -1666,7 +1683,7 @@ class App(tk.Tk):
 
     def minimize(self):
         if not self.show_in_taskbar:
-            self.withdraw()  # 背景模式：隱藏視窗，程式與提醒照常執行；Ctrl + Alt + D 叫回
+            self.withdraw()  # 背景模式：隱藏視窗，程式與提醒照常執行；F8 或 Ctrl + Alt + D 叫回
             return
         if self.borderless:
             self._mark_user_minimize()  # 自己按「—」縮小，不是 Win + D
@@ -1683,8 +1700,9 @@ class App(tk.Tk):
             state.update(x=self.winfo_x(), y=self.winfo_y(),
                          w=self.winfo_width(), h=self.winfo_height())
         save_state(state)
-        if self.hotkey_ok:
-            win_unregister_hotkey(self)
+        for hotkey_id in self.hotkeys_registered:
+            win_unregister_hotkey(self, hotkey_id)
+        self.hotkeys_registered.clear()
         if getattr(self, "_poll_job", None):
             self.after_cancel(self._poll_job)
         self.destroy()
@@ -1751,7 +1769,7 @@ class App(tk.Tk):
         self._paint_pin()
         self.btn_min = self._icon_button(
             tools, "—", self.minimize,
-            tip=lambda: "縮小到工作列" if self.show_in_taskbar else "隱藏到背景（Ctrl + Alt + D 叫回）")
+            tip=lambda: "縮小到工作列" if self.show_in_taskbar else "隱藏到背景（F8 叫回）")
         btn_close = self._icon_button(tools, "✕", self.close, tip="關閉")
         if self.borderless:
             self.btn_min.pack(side="left")
