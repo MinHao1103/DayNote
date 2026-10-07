@@ -78,32 +78,43 @@ DEFAULT_HOLIDAY_CALENDAR = "zh-tw.taiwan#holiday@group.v.calendar.google.com"
 LOGIN_TIMEOUT_SEC = 300
 FOCUS_REFRESH_SEC = 30
 
-# 畫面樣式
-BG = "#ffffff"       # 白底
-BORDER = "#d6d6d6"
-TEXT = "#323130"
-EVENT_DOT = "#a19f9d"  # 月曆上「只有行程」的日期圓點
-PREVIEW_DOT = "#9fbcef"  # 月曆上「重複待辦預定」的日期圓點（比待辦的藍淡，表示還沒建立）
-CARD_BG = "#f7f7f7"   # 輸入框、詳細頁欄位底色：比白底略深，看得出可輸入
-EVENT_TIME_FONT = ("Microsoft JhengHei UI", 9, "bold")
+# 畫面樣式：奶油底＋米色層次，陶土色為強調色，粉彩色只用於圓點、色條等非文字點綴
+# 文字用色（TEXT、GRAY、ACCENT、RED、HOLIDAY_RED）在奶油底上對比皆 ≥ 4.5:1，符合無障礙
+BG = "#fbf7f0"       # 奶油底
+BORDER = "#e6dccc"
+TEXT = "#3d342c"     # 深可可色，取代純黑，較柔和
+EVENT_DOT = "#a9bfa2"  # 粉彩鼠尾草綠：月曆上「只有行程」的日期圓點、行程左側色條
+PREVIEW_DOT = "#e0bca8"  # 粉彩陶土：月曆上「重複待辦預定」的日期圓點（比待辦淡，表示還沒建立）
+CARD_BG = "#f4ede2"   # 米色：輸入框、詳細頁欄位底色，比奶油底略深，看得出可輸入
+FADED_TEXT = "#cdc2b3"  # 月曆上其他月份的日期
+ON_ACCENT = "#ffffff"   # 強調色底上的文字
+UI_FONT = "Microsoft JhengHei UI"
+EVENT_TIME_FONT = (UI_FONT, 9, "bold")
 UNDO_SECONDS = 5
 REMINDER_CHECK_MS = 30 * 1000    # 每 30 秒檢查一次提醒
 REMINDER_SNOOZE_MIN = 10
 REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
 ADD_LIST_OPTION = "＋ 新增清單…"  # 清單下拉選單的最後一項
-SELECTED = "#e8f0fc"  # 月曆選中日期：淡藍，和強調色一致
-DIVIDER = "#ececec"   # 清單列之間的細分隔線
-HOVER = "#f3f3f3"
+SELECTED = "#f5e4d8"  # 月曆選中日期：粉彩蜜桃，和強調色同色系
+DIVIDER = "#efe7da"   # 清單列之間的細分隔線
+HOVER = "#f4ece0"
 CARD = "#ffffff"
-ACCENT = "#2564cf"
-RED = "#d13438"
-HOLIDAY_RED = "#c4314b"   # 週末與國定假日的日期數字
-HOLIDAY_RED_FADED = "#e8a9b4"  # 其他月份的週末／假日
-FESTIVAL = "#e3a21a"      # 一般節日（不放假）的角標
-GRAY = "#605e5c"     # 在白底上對比約 6.5:1，符合無障礙 4.5:1
-FONT = ("Microsoft JhengHei UI", 10)
-SMALL = ("Microsoft JhengHei UI", 8)
-TITLE_FONT = ("Microsoft JhengHei UI", 15, "bold")
+ACCENT = "#9c5c45"        # 陶土色：白字對比 5.2:1、奶油底上當文字 4.9:1
+ACCENT_HOVER = "#854c38"
+ACCENT_SOFT = "#f3e2d6"   # 次要按鈕、選項膠囊的粉彩蜜桃底
+ACCENT_SOFT_HOVER = "#ecd4c4"
+RED = "#b44745"           # 柔和的玫瑰紅：逾期、錯誤
+HOLIDAY_RED = "#ad525a"   # 週末與國定假日的日期數字
+HOLIDAY_RED_FADED = "#e4c0c0"  # 其他月份的週末／假日
+FESTIVAL = "#e2b766"      # 粉彩赭黃：一般節日（不放假）的角標
+GRAY = "#72665a"     # 暖灰：在奶油底對比 5.0:1、米色欄位 4.6:1
+FONT = (UI_FONT, 10)
+SMALL = (UI_FONT, 8)
+# 標題類字型：有思源宋體（Noto Serif TC）就用襯線字，否則維持正黑體；由 apply_fonts() 於啟動時決定
+SERIF_FAMILIES = ("Noto Serif TC", "Source Han Serif TC")
+TITLE_FONT = (UI_FONT, 15, "bold")         # 頁面大標題（日期、工作詳細資訊）
+HEADING_FONT = (UI_FONT, 11)               # 月份、清單區塊標題
+SUBJECT_FONT = (UI_FONT, 14, "bold")       # 詳細頁的工作標題輸入框
 ICON_FONT = ("Segoe UI Symbol", 11)
 DEFAULT_SIZE = (380, 620)
 MIN_SIZE = (340, 480)
@@ -136,6 +147,20 @@ def apply_dpi_scale(root):
     CELL_W, CELL_H, HEAD_H, CHILD_INDENT = px(50), px(38), px(20), px(28)
     DEFAULT_SIZE = (px(380), px(620))
     MIN_SIZE = (px(340), px(480))
+
+
+def apply_fonts(root):
+    """標題類字型改用已安裝的襯線中文字型；都沒有時維持正黑體（Windows 內建無合適的中文襯線字）。
+
+    內文（10pt 以下）一律維持正黑體：小字級的中文襯線字筆畫細，在螢幕上不易閱讀。
+    """
+    global TITLE_FONT, HEADING_FONT, SUBJECT_FONT
+    installed = set(tkfont.families(root))
+    serif = next((name for name in SERIF_FAMILIES if name in installed), None)
+    if serif:
+        TITLE_FONT = (serif, 16, "bold")
+        HEADING_FONT = (serif, 11, "bold")
+        SUBJECT_FONT = (serif, 14, "bold")
 WEEK_HEAD = "日一二三四五六"   # 月曆以星期日為第一欄
 WEEKDAY_NAME = "一二三四五六日"  # 對應 date.weekday()
 
@@ -1187,8 +1212,16 @@ def draw_rounded(canvas, w, h, radius, fill, bg, outline=None, line=1, tag="shap
     r = max(1, min(radius, h // 2, w // 2))
     d = 2 * r
     img = round_image(canvas, d, fill, bg, outline=outline, width=line if outline else 0)
-    for x, y in ((0, 0), (w - d, 0), (0, h - d), (w - d, h - d)):
-        canvas.create_image(x0 + x, y0 + y, image=img, anchor="nw", tags=tag)
+    # 每個角只貼圓的四分之一：寬度小於兩倍直徑時，整張圓圖會互相蓋住而在邊緣留下底色接縫
+    cache = canvas._root().__dict__.setdefault("_corner_cache", {})
+    for x, y in ((0, 0), (w - r, 0), (0, h - r), (w - r, h - r)):
+        qx, qy = (0 if x == 0 else r), (0 if y == 0 else r)
+        key = (str(img), qx, qy)
+        if key not in cache:
+            corner = tk.PhotoImage(master=canvas._root(), width=r, height=r)
+            corner.tk.call(corner, "copy", img, "-from", qx, qy, qx + r, qy + r)
+            cache[key] = corner
+        canvas.create_image(x0 + x, y0 + y, image=cache[key], anchor="nw", tags=tag)
     boxes = [((r, 0, w - r, h), fill), ((0, r, w, h - r), fill)]  # 蓋掉圓的內側弧線
     if outline:
         boxes += [(box, outline) for box in
@@ -1204,8 +1237,8 @@ class Pill(tk.Canvas):
     style：primary（主要動作，實心強調色）、soft（次要，淡藍底）、outline（白底細框）
     """
 
-    STYLES = {"primary": (ACCENT, "white", "#1d4fa8", None),
-              "soft": ("#e8f0fc", ACCENT, "#d6e4fa", None),
+    STYLES = {"primary": (ACCENT, ON_ACCENT, ACCENT_HOVER, None),
+              "soft": (ACCENT_SOFT, ACCENT, ACCENT_SOFT_HOVER, None),
               "outline": (BG, ACCENT, HOVER, BORDER)}
 
     def __init__(self, parent, text, command, style="primary", font=FONT, padx=14, pady=5, bg=None):
@@ -1231,7 +1264,7 @@ class Pill(tk.Canvas):
 class RoundedBox(tk.Canvas):
     """圓角外框容器：內容放在 self.inner（Frame），高度跟著內容、寬度跟著版面；可切換外框顏色（例如取得焦點時）。"""
 
-    def __init__(self, parent, fill=BG, outline=BORDER, radius=12, padx=8, pady=4, bg=None):
+    def __init__(self, parent, fill=BG, outline=BORDER, radius=16, padx=8, pady=4, bg=None):
         self.fill, self.outline, self.radius = fill, outline, px(radius)
         self.parent_bg = bg or parent.cget("bg")
         self.padx, self.pady = px(padx), px(pady)
@@ -1349,7 +1382,7 @@ class Tooltip:
         tip = tk.Toplevel(self.widget)
         tip.overrideredirect(True)
         tip.attributes("-topmost", True)  # 主視窗置頂時，提示也要在最上層
-        tk.Label(tip, text=text, bg=TEXT, fg="white", font=SMALL, padx=px(6), pady=px(2)).pack()
+        tk.Label(tip, text=text, bg=TEXT, fg=ON_ACCENT, font=SMALL, padx=px(6), pady=px(2)).pack()
         tip.update_idletasks()
         x = self.widget.winfo_rootx() + (self.widget.winfo_width() - tip.winfo_reqwidth()) // 2
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + px(4)
@@ -1458,10 +1491,10 @@ class DatePicker(_Popup):
         weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(year, month)
         for row, week in enumerate(weeks, 1):
             for col, day in enumerate(week):
-                fg = TEXT if day.month == month else "#c8c6c4"
+                fg = TEXT if day.month == month else FADED_TEXT
                 bg = CARD_BG
                 if day == self.current:
-                    fg, bg = "white", ACCENT
+                    fg, bg = ON_ACCENT, ACCENT
                 elif day == today:
                     fg = ACCENT
                 lbl = tk.Label(grid, text=str(day.day), bg=bg, fg=fg, font=SMALL, width=3,
@@ -1538,7 +1571,7 @@ class RecurPicker(_Popup):
         for rule in self._options():
             selected = rule == self.current
             lbl = tk.Label(self.body, text=format_recur(rule), bg=ACCENT if selected else CARD_BG,
-                           fg="white" if selected else TEXT, font=FONT, cursor="hand2", anchor="w",
+                           fg=ON_ACCENT if selected else TEXT, font=FONT, cursor="hand2", anchor="w",
                            padx=px(6), pady=px(2))
             lbl.pack(fill="x", pady=px(1))
             lbl.bind("<Button-1>", lambda e, r=rule: self.pick(r))
@@ -1601,12 +1634,12 @@ class ReminderToast:
         if when.date() != dt.date.today():
             when_text = f"⏰ {when.month}/{when.day} {when:%H:%M}"
         tk.Label(body, text=when_text, bg=BG, fg=ACCENT, font=FONT, anchor="w").pack(fill="x", pady=(px(6), 0))
-        tk.Label(body, text=task["title"], bg=BG, fg=TEXT, font=("Microsoft JhengHei UI", 12, "bold"),
+        tk.Label(body, text=task["title"], bg=BG, fg=TEXT, font=(UI_FONT, 12, "bold"),
                  anchor="w", justify="left", wraplength=px(self.WIDTH - 40)).pack(fill="x", pady=(px(2), px(10)))
 
         buttons = tk.Frame(body, bg=BG)
         buttons.pack(fill="x")
-        done = tk.Label(buttons, text="✓ 完成", bg=ACCENT, fg="white", font=FONT, cursor="hand2",
+        done = tk.Label(buttons, text="✓ 完成", bg=ACCENT, fg=ON_ACCENT, font=FONT, cursor="hand2",
                         padx=px(12), pady=px(3))
         done.pack(side="right")
         done.bind("<Button-1>", lambda e: (self.close(), on_done()))
@@ -1670,9 +1703,9 @@ class QuickBar:
 
         row = tk.Frame(body, bg=BG)
         row.pack(fill="x")
-        tk.Label(row, text="＋", bg=BG, fg=ACCENT, font=("Microsoft JhengHei UI", 15)).pack(side="left")
+        tk.Label(row, text="＋", bg=BG, fg=ACCENT, font=(UI_FONT, 15)).pack(side="left")
         self.text = tk.StringVar(win)
-        self.entry = tk.Entry(row, textvariable=self.text, font=("Microsoft JhengHei UI", 14), relief="flat",
+        self.entry = tk.Entry(row, textvariable=self.text, font=(UI_FONT, 14), relief="flat",
                               bg=BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0)
         self.entry.pack(side="left", fill="x", expand=True, padx=(px(8), 0), ipady=px(4))
         self.chips = tk.Label(body, bg=BG, font=FONT, anchor="w", justify="left")
@@ -1890,7 +1923,7 @@ def ask_text(parent, title, prompt, ok_text="建立"):
 
     buttons = tk.Frame(win, bg=BG)
     buttons.pack(fill="x")
-    btn_ok = tk.Label(buttons, text=ok_text, bg=ACCENT, fg="white", font=FONT, padx=px(14), pady=px(3), cursor="hand2")
+    btn_ok = tk.Label(buttons, text=ok_text, bg=ACCENT, fg=ON_ACCENT, font=FONT, padx=px(14), pady=px(3), cursor="hand2")
     btn_ok.pack(side="right")
     btn_ok.bind("<Button-1>", ok)
     btn_cancel = tk.Label(buttons, text="取消", bg=BG, fg=GRAY, font=FONT, padx=px(10), pady=px(3), cursor="hand2")
@@ -1928,6 +1961,7 @@ class App(tk.Tk):
                  holiday_calendar=DEFAULT_HOLIDAY_CALENDAR, desktop_reminder=True, show_in_taskbar=False):
         super().__init__()
         apply_dpi_scale(self)
+        apply_fonts(self)
         self.g = google
         self.title(APP)
         self.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
@@ -2202,11 +2236,11 @@ class App(tk.Tk):
 
     def _build(self):
         top = tk.Frame(self, bg=BG)
-        top.pack(fill="x", padx=(px(12), px(4)), pady=(px(6), 0))
+        top.pack(fill="x", padx=(px(18), px(6)), pady=(px(6), 0))
         # 右側按鈕群先 pack，空間不足時被壓縮的是日期標題，而不是按鈕
         tools = tk.Frame(top, bg=BG)
         tools.pack(side="right", anchor="n", pady=(px(18), 0))  # 按鈕固定在右上角；離上緣留空白，太貼邊會有壓迫感
-        self.btn_login = tk.Label(tools, text="登入", bg=ACCENT, fg="white", font=FONT,
+        self.btn_login = tk.Label(tools, text="登入", bg=ACCENT, fg=ON_ACCENT, font=FONT,
                                   padx=px(8), cursor="hand2")
         self.btn_login.bind("<Button-1>", lambda e: self.login())
         Tooltip(self.btn_login, "用瀏覽器登入 Google 帳號")
@@ -2239,7 +2273,7 @@ class App(tk.Tk):
         self.main_view = tk.Frame(self, bg=BG)
         self.detail_view = tk.Frame(self, bg=BG)
         nav = tk.Frame(self.main_view, bg=BG)
-        nav.pack(fill="x", padx=px(12), pady=(px(18), 0))  # 和標題拉開距離
+        nav.pack(fill="x", padx=px(16), pady=(px(20), px(4)))  # 和標題拉開距離
         self._icon_button(nav, "◀", lambda: self.shift_month(-1),
                           tip=lambda: "上一週" if self.compact else "上個月").pack(side="left")
         self.btn_compact = self._icon_button(
@@ -2250,7 +2284,7 @@ class App(tk.Tk):
                           tip="回到今天（Home）").pack(side="right")
         self._icon_button(nav, "▶", lambda: self.shift_month(1),
                           tip=lambda: "下一週" if self.compact else "下個月").pack(side="right")
-        self.lbl_month = tk.Label(nav, font=FONT, bg=BG)
+        self.lbl_month = tk.Label(nav, font=HEADING_FONT, bg=BG, fg=TEXT)
         self.lbl_month.pack(side="left", expand=True)
 
         self.cal = tk.Canvas(self.main_view, width=7 * CELL_W, height=HEAD_H + 6 * CELL_H,
@@ -2260,7 +2294,7 @@ class App(tk.Tk):
 
         # 底部先 pack，視窗縮小時才不會被任務清單擠掉
         status_row = tk.Frame(self, bg=BG)
-        status_row.pack(side="bottom", fill="x", padx=(px(12), 0))
+        status_row.pack(side="bottom", fill="x", padx=(px(18), 0))
         grip = tk.Label(status_row, text="◢", bg=BG, fg=BORDER, font=SMALL, cursor="size_nw_se")
         Tooltip(grip, "拖拉調整視窗大小")
         grip.pack(side="right", anchor="se")
@@ -2275,7 +2309,7 @@ class App(tk.Tk):
         status_row.bind("<Configure>", lambda e: self.status.config(wraplength=max(e.width - px(30), px(100))))
         # 底部新增列：左邊快捷輸入（Enter 新增，可寫「明天 3點」）、「詳細」開完整新增頁、最右邊「新增」按鈕
         self.add_box = RoundedBox(self.main_view, fill=BG, outline=BORDER, radius=21, padx=6, pady=5)
-        self.add_box.pack(side="bottom", fill="x", padx=px(12), pady=(px(2), px(8)))
+        self.add_box.pack(side="bottom", fill="x", padx=px(16), pady=(px(6), px(10)))
         bottom = self.add_box.inner
         self.btn_add = Pill(bottom, "新增", self.add_task, style="primary", padx=14, pady=4)
         self.btn_add.pack(side="right")
@@ -2300,7 +2334,7 @@ class App(tk.Tk):
 
         # 可捲動的任務清單
         wrap = self.list_wrap = tk.Frame(self.main_view, bg=BG)
-        wrap.pack(fill="both", expand=True, padx=px(12))
+        wrap.pack(fill="both", expand=True, padx=(px(18), px(12)))
         self.list_canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
         scrollbar = ttk.Scrollbar(wrap, orient="vertical", command=self.list_canvas.yview)
         self.list_frame = tk.Frame(self.list_canvas, bg=BG)
@@ -2350,27 +2384,28 @@ class App(tk.Tk):
                 cx, cy = x + CELL_W / 2, y + px(17)
                 if day == self.selected:
                     # 選取框（圓角）、今天的圓圈、日期數字共用同一個中心點 cy，圓圈才會在框內置中
-                    draw_rounded(c, CELL_W - px(4), px(32), px(10), SELECTED, BG, tag="selected",
+                    draw_rounded(c, CELL_W - px(4), px(32), px(16), SELECTED, BG, tag="selected",
                                  x0=x + px(2), y0=cy - px(16))
                 if day == self.today:
                     d = px(22)
                     img = round_image(c, d, ACCENT, SELECTED if day == self.selected else BG)
                     c.create_image(round(cx - d / 2), round(cy - d / 2), image=img, anchor="nw")
-                    color = "white"
+                    color = ON_ACCENT
                 else:
                     off = day.weekday() >= 5 or self._is_day_off(day)
                     if day.month == month:
                         color = HOLIDAY_RED if off else TEXT
                     else:
-                        color = HOLIDAY_RED_FADED if off else "#c8c6c4"
+                        color = HOLIDAY_RED_FADED if off else FADED_TEXT
                 c.create_text(cx, cy, text=str(day.day), fill=color, font=FONT)
                 names = self.holidays.get(day)
-                if names:  # 右上角三角形：紅＝放假的節日，橘＝一般節日
+                if names:  # 數字右上方的小圓點：紅＝放假的節日，赭黃＝一般節日
                     mark = HOLIDAY_RED if self._is_day_off(day) else FESTIVAL
                     if day.month != month:
                         mark = HOLIDAY_RED_FADED
-                    rx, ty = x + CELL_W - px(4), y + px(2)
-                    c.create_polygon(rx - px(8), ty, rx, ty, rx, ty + px(8), fill=mark, outline="")
+                    d = px(6)  # 位置落在選取框的圓角內、今天的圓圈外
+                    img = round_image(c, d, mark, SELECTED if day == self.selected else BG)
+                    c.create_image(round(cx + px(13) - d / 2), round(cy - px(9) - d / 2), image=img, anchor="nw")
                 if day in task_days or day in preview_days or day in self.events:
                     # 紅＝有逾期未完成待辦；藍＝有待辦；淡藍＝重複待辦預定的日子；灰＝只有日曆行程
                     if day in task_days:
@@ -2420,7 +2455,7 @@ class App(tk.Tk):
         previews = self._previews(day, day).get(day, [])
         label = "今天" if day == self.today else f"{day.month}月{day.day}日"
         tk.Label(self.list_frame, text=f"{label} · {len(events) + len(tasks) + len(previews)} 項",
-                 bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(8, 2))
+                 bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(px(14), px(4)))
         for name, day_off in self.holidays.get(day, []):
             tk.Label(self.list_frame, text=f"◆ {name}" + ("（放假）" if day_off else ""),
                      bg=BG, fg=HOLIDAY_RED if day_off else GRAY, font=FONT, anchor="w").pack(fill="x", pady=(0, 2))
@@ -2482,15 +2517,15 @@ class App(tk.Tk):
         """未登入時，清單區改顯示明確的登入提示（取代「這天沒有任務」）。"""
         box = tk.Frame(self.list_frame, bg=BG)
         box.pack(fill="x", pady=px(30))
-        tk.Label(box, text="尚未登入 Google", bg=BG, fg=TEXT, font=("Microsoft JhengHei UI", 12, "bold")).pack()
+        tk.Label(box, text="尚未登入 Google", bg=BG, fg=TEXT, font=HEADING_FONT).pack()
         tk.Label(box, text="登入後才能讀取與新增工作", bg=BG, fg=GRAY, font=SMALL).pack(pady=(px(4), px(12)))
         Pill(box, "登入 Google", self.login, style="primary", padx=20).pack()
 
     def _section_header(self, text, expanded, toggle, fg=ACCENT):
         """可收合區塊的標題列（逾期、未排日期）。"""
         header = tk.Label(self.list_frame, text=f"{'▼' if expanded else '▶'} {text}",
-                          bg=BG, fg=fg, font=FONT, cursor="hand2", anchor="w")
-        header.pack(fill="x", pady=(10, 2))
+                          bg=BG, fg=fg, font=HEADING_FONT, cursor="hand2", anchor="w")
+        header.pack(fill="x", pady=(px(14), px(4)))
         header.bind("<Button-1>", lambda e: toggle())
 
     # ---- 任務階層（比照 Google Tasks：子任務縮排在父任務下方）
@@ -2599,7 +2634,7 @@ class App(tk.Tk):
             c.delete("tick")
             state["done"] = True
             c.itemconfigure("ring", image=ring_image(c.cget("bg")))
-            c.create_text(mid, mid, text="✓", fill="white", font=SMALL)
+            c.create_text(mid, mid, text="✓", fill=ON_ACCENT, font=SMALL)
             self.after(250, lambda: self.complete(task))  # 讓使用者看到勾選效果再移除
         c.bind("<Button-1>", done)
         return c
@@ -2624,7 +2659,7 @@ class App(tk.Tk):
             parts.append(f"📁 {lst.get('title', '')}")
         self.lbl_quick_chips.config(text="　".join(parts))
         if not self.lbl_quick_chips.winfo_ismapped():
-            self.lbl_quick_chips.pack(side="bottom", fill="x", padx=px(16), before=self.list_wrap)
+            self.lbl_quick_chips.pack(side="bottom", fill="x", padx=px(22), before=self.list_wrap)
 
     def _on_add_click(self):
         """點「＋」：開啟新增頁（可一次設定日期、提醒、重複、清單與詳細資訊）；輸入框已打的字帶進標題。"""
@@ -2662,7 +2697,7 @@ class App(tk.Tk):
         view, draft = self.detail_view, self.draft
         for w in view.winfo_children():
             w.destroy()
-        pad = {"padx": px(12)}
+        pad = {"padx": px(18)}
 
         bar = tk.Frame(view, bg=BG)
         bar.pack(fill="x", pady=(px(6), px(4)), **pad)
@@ -2678,7 +2713,7 @@ class App(tk.Tk):
         Tooltip(self.draft_list, "要放進哪個清單；也可以新增清單")
 
         self.draft_title = self._rounded_field(
-            view, lambda parent: tk.Entry(parent, font=("Microsoft JhengHei UI", 14, "bold"), relief="flat",
+            view, lambda parent: tk.Entry(parent, font=SUBJECT_FONT, relief="flat",
                                           bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),
             pady=(px(8), px(2)), **pad)
         self.draft_title.insert(0, draft["title_draft"])
@@ -2726,7 +2761,7 @@ class App(tk.Tk):
 
     def _rounded_field(self, parent, factory, **pack):
         """圓角輸入框：factory(容器) 建立 Entry／Text，外框在取得焦點時變成強調色。回傳輸入元件。"""
-        box = RoundedBox(parent, fill=CARD_BG, outline=BORDER, radius=10, padx=8, pady=5)
+        box = RoundedBox(parent, fill=CARD_BG, outline=BORDER, radius=14, padx=10, pady=6)
         box.pack(fill="x", **pack)
         widget = factory(box.inner)
         widget.pack(fill="x", expand=True)
@@ -2855,7 +2890,7 @@ class App(tk.Tk):
         for w in view.winfo_children():
             w.destroy()
         task = self.detail["task"]
-        pad = {"padx": px(12)}
+        pad = {"padx": px(18)}
 
         bar = tk.Frame(view, bg=BG)
         bar.pack(fill="x", pady=(px(6), px(4)), **pad)
@@ -2868,7 +2903,7 @@ class App(tk.Tk):
         tk.Label(view, text=f"清單：{task['list_title']}", bg=BG, fg=GRAY, font=SMALL,
                  anchor="w").pack(fill="x", **pad)
         self.detail_title = self._rounded_field(
-            view, lambda parent: tk.Entry(parent, font=("Microsoft JhengHei UI", 14, "bold"), relief="flat",
+            view, lambda parent: tk.Entry(parent, font=SUBJECT_FONT, relief="flat",
                                           bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),
             pady=(px(4), px(8)), **pad)
         self.detail_title.insert(0, self.detail.get("title_draft", task["title"]))
@@ -3676,12 +3711,13 @@ def run_setup_wizard():
     """沒有 config.json（或仍是範例值）時的首次設定視窗。完成回傳設定，取消回傳 None。"""
     root = tk.Tk()
     apply_dpi_scale(root)
+    apply_fonts(root)
     root.title("DayNote 首次設定")
     root.configure(bg=BG, padx=px(24), pady=px(20))
     root.resizable(False, False)
     result = {"cfg": None}
 
-    tk.Label(root, text="歡迎使用 DayNote", bg=BG, fg=TEXT, font=("Microsoft JhengHei UI", 15, "bold"),
+    tk.Label(root, text="歡迎使用 DayNote", bg=BG, fg=TEXT, font=TITLE_FONT,
              anchor="w").pack(fill="x")
     steps = ("第一次使用需要一個 Google 金鑰檔（client_secret_….json）。\n\n"
              "還沒有：按「開啟設定教學」，照步驟做完就會下載這個檔案。\n"
@@ -3709,7 +3745,7 @@ def run_setup_wizard():
 
     buttons = tk.Frame(root, bg=BG)
     buttons.pack(fill="x")
-    pick = tk.Label(buttons, text="選擇金鑰檔…", bg=ACCENT, fg="white", font=FONT, cursor="hand2",
+    pick = tk.Label(buttons, text="選擇金鑰檔…", bg=ACCENT, fg=ON_ACCENT, font=FONT, cursor="hand2",
                     padx=px(14), pady=px(5))
     pick.pack(side="left")
     pick.bind("<Button-1>", lambda e: choose())
