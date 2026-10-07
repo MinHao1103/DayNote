@@ -83,6 +83,7 @@ BG = "#ffffff"       # 白底
 BORDER = "#d6d6d6"
 TEXT = "#323130"
 EVENT_DOT = "#a19f9d"  # 月曆上「只有行程」的日期圓點
+PREVIEW_DOT = "#9fbcef"  # 月曆上「重複待辦預定」的日期圓點（比待辦的藍淡，表示還沒建立）
 CARD_BG = "#f7f7f7"   # 輸入框、詳細頁欄位底色：比白底略深，看得出可輸入
 EVENT_TIME_FONT = ("Microsoft JhengHei UI", 9, "bold")
 UNDO_SECONDS = 5
@@ -857,6 +858,23 @@ def next_due(rule, base, today):
         if _matches(rule, day):
             return day
     raise ValueError(f"找不到符合規則的日期：{rule}")
+
+
+def upcoming_days(task, start, end, today):
+    """重複待辦在 [start, end] 之間「預定」的日子（只供畫面預覽，Google 上還沒有這些期）。
+
+    與 next_due 一致：從這一期的下一天、且不早於今天開始算；不是週期父工作時回傳空清單。
+    """
+    rule = task.get("recur")
+    if not rule or task.get("parent"):
+        return []
+    day = max((task.get("due") or today) + dt.timedelta(days=1), today, start)
+    days = []
+    while day <= end:
+        if _matches(rule, day):
+            days.append(day)
+        day += dt.timedelta(days=1)
+    return days
 
 
 def next_task_for(task, today):
@@ -2324,6 +2342,7 @@ class App(tk.Tk):
         self.weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(year, month)
         if self.compact:
             self.weeks = [w for w in self.weeks if self.selected in w] or self.weeks[:1]
+        preview_days = set(self._previews(self.weeks[0][0], self.weeks[-1][-1]))
         c.config(height=HEAD_H + len(self.weeks) * CELL_H)  # 依當月週數調整高度，不留空白列
         for row, week in enumerate(self.weeks):
             for col, day in enumerate(week):
@@ -2352,10 +2371,12 @@ class App(tk.Tk):
                         mark = HOLIDAY_RED_FADED
                     rx, ty = x + CELL_W - px(4), y + px(2)
                     c.create_polygon(rx - px(8), ty, rx, ty, rx, ty + px(8), fill=mark, outline="")
-                if day in task_days or day in self.events:
-                    # 紅＝有逾期未完成待辦；藍＝有待辦；灰＝只有日曆行程
+                if day in task_days or day in preview_days or day in self.events:
+                    # 紅＝有逾期未完成待辦；藍＝有待辦；淡藍＝重複待辦預定的日子；灰＝只有日曆行程
                     if day in task_days:
                         dot = RED if day < self.today else ACCENT
+                    elif day in preview_days:
+                        dot = PREVIEW_DOT
                     else:
                         dot = EVENT_DOT
                     d, left, top = px(4), round(cx - px(2)), round(cy + px(13))
@@ -2396,8 +2417,9 @@ class App(tk.Tk):
                     for task in overdue:
                         self._task_with_children(task)
         # 當天標題放在逾期區之後，緊貼當天的項目
+        previews = self._previews(day, day).get(day, [])
         label = "今天" if day == self.today else f"{day.month}月{day.day}日"
-        tk.Label(self.list_frame, text=f"{label} · {len(events) + len(tasks)} 項",
+        tk.Label(self.list_frame, text=f"{label} · {len(events) + len(tasks) + len(previews)} 項",
                  bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(8, 2))
         for name, day_off in self.holidays.get(day, []):
             tk.Label(self.list_frame, text=f"◆ {name}" + ("（放假）" if day_off else ""),
@@ -2406,7 +2428,9 @@ class App(tk.Tk):
             self._card(title, "Google 日曆", None, event_time=when)
         for task in tasks:
             self._task_with_children(task)
-        if not events and not tasks:
+        for task in previews:
+            self._preview_card(task)
+        if not events and not tasks and not previews:
             tk.Label(self.list_frame, text="這天沒有任務", bg=BG, fg=GRAY, font=FONT).pack(pady=8)
 
         undated = sorted((t for t in top_level if t["due"] is None), key=self._order_key)
@@ -2416,6 +2440,43 @@ class App(tk.Tk):
                 for task in undated:
                     self._task_with_children(task)
         self.list_canvas.yview_moveto(0)
+
+    def _previews(self, start, end):
+        """重複待辦在 [start, end] 預定的日子：{日期: [來源任務]}。
+
+        Google 上同一時間只有「這一期」，下一期在完成後才建立；這裡只做畫面預覽。
+        那天已經有同標題、同規則的真實待辦（例如已提前建立的下一期）就不再顯示預覽。
+        """
+        today = dt.date.today()
+        top = self._top_level()
+        real = {(t["due"], t["title"], t.get("recur")) for t in top if t["due"]}
+        previews = {}
+        for task in top:
+            for day in upcoming_days(task, start, end, today):
+                if (day, task["title"], task["recur"]) not in real:
+                    previews.setdefault(day, []).append(task)
+        return previews
+
+    def _preview_card(self, task):
+        """重複待辦預定的一期：灰色、沒有完成圓圈（還沒建立，不能勾選），點了開啟這筆重複待辦。"""
+        row = tk.Frame(self.list_frame, bg=BG, cursor="hand2")
+        row.pack(fill="x", pady=(px(2), 0))
+        icon = tk.Label(row, text="🔁", bg=BG, fg=PREVIEW_DOT, font=FONT, width=2, cursor="hand2")
+        icon.pack(side="left", padx=(px(4), px(10)), pady=px(6))
+        text = tk.Frame(row, bg=BG, cursor="hand2")
+        text.pack(side="left", fill="x", expand=True, pady=px(6))
+        title = tk.Label(text, text=task["title"], bg=BG, fg=GRAY, font=FONT, anchor="w", cursor="hand2")
+        title.pack(fill="x")
+        at = time_text(task.get("time"))
+        current = f"{task['due'].month}/{task['due'].day}" if task["due"] else "這一期"
+        subtitle = " · ".join(p for p in ("預定", f"⏰ {at}" if at else "", f"🔁 {format_recur(task['recur'])}",
+                                          task["list_title"]) if p)
+        tk.Label(text, text=subtitle, bg=BG, fg=GRAY, font=SMALL, anchor="w", cursor="hand2").pack(fill="x")
+        tk.Frame(self.list_frame, bg=DIVIDER, height=1).pack(fill="x")
+        tip = f"完成 {current} 那一期後，才會建立這一期（點一下開啟這筆重複待辦）"
+        for widget in (row, icon, text, *text.winfo_children()):
+            widget.bind("<Button-1>", lambda e: self.open_detail(task))
+            Tooltip(widget, tip)
 
     def _draw_login_prompt(self):
         """未登入時，清單區改顯示明確的登入提示（取代「這天沒有任務」）。"""

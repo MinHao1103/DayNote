@@ -1224,6 +1224,83 @@ class CalendarTest(AppTestCase):
         self.assertEqual(shown, ["早上", "晚上", "沒時間"])
 
 
+# ---------------------------------------------------------------- 重複待辦的預定日子
+
+class PreviewTest(AppTestCase):
+    """重複待辦在其他天以「預定」顯示（還沒建立，不能勾選）。"""
+
+    def other_day(self, weeks=1):
+        return self.today + dt.timedelta(days=7 * weeks)
+
+    def test_weekly_shows_on_future_day(self):
+        """今天的每週任務 > 下週同一天顯示灰色「預定」列，不能勾選"""
+        # Given: 今天是這一期、每週重複
+        rule = f"每週{daynote.WEEKDAY_NAME[self.today.weekday()]}"
+        self.g.seed("交週報", self.today, notes=f"🔁 {rule}")
+        app = self.start()
+        # When: 選下週同一天
+        app.select(self.other_day())
+        settle(app)
+        # Then: 預定列
+        shown = self.list_texts()
+        self.assertIn("交週報", shown)
+        self.assertIn(f"預定 · 🔁 {rule} · 工作", shown)
+        self.assertNotIn("這天沒有任務", shown)
+        title = find_label(app.list_frame, "交週報")
+        self.assertFalse(any(isinstance(w, tk.Canvas) for w in descendants(title.master.master)))
+
+    def test_calendar_marks_preview_days(self):
+        """每天重複 > 月曆上明天起的日子以淡藍點標示；今天仍是一般的藍點"""
+        # Given: 每天重複
+        self.g.seed("吃藥", self.today, notes="🔁 每天")
+        app = self.start()
+        # When: 看預定日子
+        days = app._previews(app.weeks[0][0], app.weeks[-1][-1])
+        # Then: 明天有、今天沒有（今天是真的待辦）
+        self.assertIn(self.today + dt.timedelta(days=1), days)
+        self.assertNotIn(self.today, days)
+
+    def test_click_preview_opens_task(self):
+        """點預定列 > 開啟這筆重複待辦（目前這一期）的詳細頁"""
+        # Given: 下週的預定列
+        rule = f"每週{daynote.WEEKDAY_NAME[self.today.weekday()]}"
+        self.g.seed("交週報", self.today, notes=f"🔁 {rule}")
+        app = self.start()
+        app.select(self.other_day())
+        settle(app)
+        # When: 點它
+        click(find_label(app.list_frame, "交週報"))
+        # Then: 詳細頁是今天那一期
+        self.assertEqual(app.detail["task"]["title"], "交週報")
+        self.assertEqual(app.detail["task"]["due"], self.today)
+
+    def test_no_duplicate_when_next_exists(self):
+        """下一期已經真的建立了 > 那天只顯示真的那筆，不再多一列預定"""
+        # Given: 今天和下週都有同標題同規則的待辦
+        rule = f"每週{daynote.WEEKDAY_NAME[self.today.weekday()]}"
+        self.g.seed("交週報", self.today, notes=f"🔁 {rule}")
+        self.g.seed("交週報", self.other_day(), notes=f"🔁 {rule}")
+        app = self.start()
+        # When: 選下週
+        app.select(self.other_day())
+        settle(app)
+        # Then: 只有一筆、不是預定
+        shown = self.list_texts()
+        self.assertEqual(shown.count("交週報"), 1)
+        self.assertFalse(any(t.startswith("預定") for t in shown))
+
+    def test_non_recurring_no_preview(self):
+        """一般待辦 > 其他天不會出現"""
+        # Given: 今天的一般待辦
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        # When: 選下週
+        app.select(self.other_day())
+        settle(app)
+        # Then: 沒有
+        self.assertIn("這天沒有任務", self.list_texts())
+
+
 # ---------------------------------------------------------------- 提醒
 
 class ReminderTest(AppTestCase):
