@@ -265,11 +265,18 @@ Google 預設 7 天後會要你重新登入。想要一直保持登入：
 
 ### 打不開 DayNote
 
-公司電腦有時會擋住 `StartDayNote` 或 `StartDayNoteSilent`。先試另一個；兩個都打不開，可以改用下面的方法：
+DayNote 會**優先用電腦上已經安裝的 Python**（3.10 以上、有 tcl/tk），找不到才用資料夾裡內附的 `runtime`。公司電腦常會擋「從下載的 zip 解壓縮出來的程式」，所以電腦上有裝 Python 的話，比較不會被擋。
 
-1. 打開 `DayNote` 資料夾
-2. 點檔案總管最上面的**網址列**（顯示資料夾路徑的地方），輸入 `cmd`，按 Enter
-3. 跳出黑色視窗後，貼上下面這行，按 Enter：
+公司電腦還是擋住 `StartDayNote` 或 `StartDayNoteSilent` 時，依序試試：
+
+1. **解壓縮前先解除封鎖**：在下載的 `DayNote.zip` 上按右鍵 →「內容」→ 勾選「解除封鎖」→「確定」，再「解壓縮全部」
+2. **手動啟動**：打開 `DayNote` 資料夾，點檔案總管最上面的**網址列**（顯示資料夾路徑的地方），輸入 `cmd` 按 Enter，在跳出的黑色視窗貼上下面這行按 Enter（電腦有裝 Python 時）：
+
+```bat
+start "" pythonw app\daynote.pyw
+```
+
+電腦沒有裝 Python，改貼這行（用內附的）：
 
 ```bat
 start "" runtime\pythonw.exe app\daynote.pyw
@@ -277,10 +284,10 @@ start "" runtime\pythonw.exe app\daynote.pyw
 
 DayNote 打開後，黑色視窗可以關掉。
 
-還是打不開，在同一個黑色視窗貼上下面這行，把視窗裡出現的文字截圖給維護的人：
+還是打不開，在同一個黑色視窗貼上下面這行（沒裝 Python 就把 `python` 換成 `runtime\python.exe`），把視窗裡出現的文字截圖給維護的人：
 
 ```bat
-runtime\python.exe app\daynote.pyw
+python app\daynote.pyw
 ```
 
 ---
