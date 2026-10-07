@@ -935,7 +935,7 @@ class DetailTest(AppTestCase):
         app = self.start()
         # When: 開了直接返回
         self.open("寫週報")
-        click(find_label(app.detail_view, "← 儲存並返回"))
+        click(find_label(app.detail_view, "儲存"))
         pump(app, 0.2)
         # Then: 沒有 update
         self.assertNotIn("update_task", self.g.calls)
@@ -1056,7 +1056,7 @@ class DetailTest(AppTestCase):
         (raw,) = self.g.by_title("叫貨車")
         self.assertEqual(raw["parent"], parent)
         self.assertIn("叫貨車", texts(app.detail_view))
-        click(find_label(app.detail_view, "← 儲存並返回"))
+        click(find_label(app.detail_view, "儲存"))
         self.assertIn("叫貨車", self.list_texts())
 
     def test_subtask_detail_has_no_recur(self):

@@ -2894,7 +2894,6 @@ class App(tk.Tk):
 
         bar = tk.Frame(view, bg=BG)
         bar.pack(fill="x", pady=(px(6), px(4)), **pad)
-        self._icon_button(bar, "← 儲存並返回", self.close_detail, font=FONT, tip="儲存並返回（Esc）").pack(side="left")
         btn_delete = self._icon_button(bar, "刪除", self.delete_detail, font=FONT, tip="刪除這筆工作")
         btn_delete.config(fg=RED)
         btn_delete.bind("<Leave>", lambda e: btn_delete.config(fg=RED), add="+")
