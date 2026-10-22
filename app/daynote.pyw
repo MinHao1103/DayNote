@@ -144,7 +144,7 @@ GRAY = "#72665a"     # 暖灰：在奶油底對比 5.0:1、米色欄位 4.6:1
 # 每種風格的文字用色（TEXT、GRAY、ACCENT、RED、HOLIDAY_RED）在 BG 與 CARD_BG 上對比皆 ≥ 4.5:1（有單元測試檢查）
 # fonts：title／heading＝標題字級；serif＝標題用思源宋體（沒安裝時維持正黑體）
 THEMES = {
-    "cream": {"name": "奶油陶土", "fonts": {"serif": True, "title": 16, "heading": 11}, "colors": {
+    "cream": {"name": "奶油陶土", "fonts": {"serif": True, "title": 20, "heading": 11}, "colors": {
         "BG": "#fbf7f0", "BORDER": "#e6dccc", "TEXT": "#3d342c", "EVENT_DOT": "#a9bfa2", "PREVIEW_DOT": "#e0bca8",
         "CARD_BG": "#f4ede2", "FADED_TEXT": "#cdc2b3", "ON_ACCENT": "#ffffff", "SELECTED": "#f5e4d8",
         "DIVIDER": "#efe7da", "HOVER": "#f4ece0", "CARD": "#ffffff", "ACCENT": "#985a43",
@@ -2991,9 +2991,9 @@ class App(tk.Tk):
                         self._task_with_children(task)
         # 當天標題放在逾期區之後，緊貼當天的項目
         previews = self._previews(day, day).get(day, [])
+        # 當天標題和「逾期」「未排日期」同一層級（標題字型＋數量），今天的待辦才是畫面的重點
         label = "今天" if day == self.today else f"{day.month}月{day.day}日"
-        tk.Label(self.list_frame, text=f"{label} · {len(events) + len(tasks) + len(previews)} 項",
-                 bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(px(14), px(4)))
+        self._section_header(f"{label}（{len(events) + len(tasks) + len(previews)}）", True, None, fg=TEXT)
         for name, day_off in self.holidays.get(day, []):
             tk.Label(self.list_frame, text=f"◆ {name}" + ("（放假）" if day_off else ""),
                      bg=BG, fg=HOLIDAY_RED if day_off else GRAY, font=FONT, anchor="w").pack(fill="x", pady=(0, 2))
@@ -3068,33 +3068,35 @@ class App(tk.Tk):
         Pill(box, "登入 Google", self.login, style="primary", padx=20).pack()
 
     def _section_header(self, text, expanded, toggle, fg=None, action=None):
-        """可收合區塊的標題列（逾期、未排日期）：左邊標題＋淡色數量，右邊收合箭頭，整列可點。
+        """區塊標題列（逾期、今天、未排日期）：左邊標題＋淡色數量；可收合時右邊有箭頭，整列可點。
 
-        text 形如「逾期（1）」；標題 Label 的 text_value 保留「▼ 逾期（1）」，供測試辨識。
+        text 形如「逾期（1）」；可收合時標題 Label 的 text_value 保留「▼ 逾期（1）」，供測試辨識。
+        toggle 為 None：不可收合（例如當天的標題），沒有箭頭也不能點。
         action＝(文字, 函式)：收合箭頭左邊的動作連結（例如「全部移到今天」），點它不會收合區塊。
         @return 動作連結的 Label；沒有 action 時回傳 None
         """
         fg = fg or ACCENT
-        full = f"{'▼' if expanded else '▶'} {text}"
+        full = f"{'▼' if expanded else '▶'} {text}" if toggle else text
+        cursor = "hand2" if toggle else ""
         name, _, count = text.rstrip("）").partition("（")
-        header = tk.Frame(self.list_frame, bg=BG, cursor="hand2")
+        header = tk.Frame(self.list_frame, bg=BG, cursor=cursor)
         header.pack(fill="x", pady=(px(16), px(4)))
-        title = tk.Label(header, text=name, bg=BG, fg=fg, font=HEADING_FONT, cursor="hand2", anchor="w")
+        title = tk.Label(header, text=name, bg=BG, fg=fg, font=HEADING_FONT, cursor=cursor, anchor="w")
         title.text_value = full
         title.pack(side="left")
         parts = [header, title]
         if count:
-            badge = tk.Label(header, text=count, bg=BG, fg=GRAY, font=SMALL, cursor="hand2")
+            badge = tk.Label(header, text=count, bg=BG, fg=GRAY, font=SMALL, cursor=cursor)
             badge.pack(side="left", padx=(px(6), 0))
             parts.append(badge)
-        if ICON_GLYPH_FONT:
+        if toggle and ICON_GLYPH_FONT:
             arrow = tk.Label(header, text=GLYPHS["▼" if expanded else "▶"], bg=BG, fg=GRAY,
                              font=(ICON_GLYPH_FONT, 8), cursor="hand2")
             arrow.pack(side="right", padx=(0, px(6)))
             parts.append(arrow)
-        else:
+        elif toggle:  # 沒有圖示字型：箭頭直接寫在標題文字裡
             title.config(text=full)
-        for widget in parts:
+        for widget in parts if toggle else ():
             widget.bind("<Button-1>", lambda e: toggle())
         if action:
             label, command = action

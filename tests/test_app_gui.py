@@ -374,7 +374,7 @@ class StartupTest(AppTestCase):
         app = self.start()
         # Then: 畫面顯示任務、清單下拉與同步狀態
         self.assertIn("寫週報", self.list_texts())
-        self.assertIn("今天 · 1 項", self.list_texts())
+        self.assertIn("今天（1）", self.list_texts())
         self.assertEqual(app.current_list()["title"], "工作")
         self.assertEqual([lst["title"] for lst in app.lists], ["工作", "個人"])
         self.assertTrue(self.status().startswith("已同步"))
@@ -1274,7 +1274,7 @@ class CalendarTest(AppTestCase):
         # Then: 切換
         self.assertEqual(app.selected, other)
         self.assertIn("交報告", self.list_texts())
-        self.assertIn(f"{other.month}月{other.day}日 · 1 項", self.list_texts())
+        self.assertIn(f"{other.month}月{other.day}日（1）", self.list_texts())
         self.assertEqual(app.new_due, other)
 
     def test_month_navigation_and_today(self):
