@@ -24,7 +24,6 @@ import queue
 import re
 import secrets
 import ssl
-import subprocess
 import threading
 import time
 import tkinter as tk
@@ -104,7 +103,6 @@ REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
 NEXT_UP_TICK_MS = 60 * 1000      # 「下一件」摘要每分鐘更新
 FIRST_RUN_TIP = "小技巧：在待辦上按右鍵可以改日期；Ctrl + Alt + D 隨時快速新增"  # 第一次同步成功後在狀態列提示一次
 FIRST_RUN_TIP_MS = 15 * 1000
-RESTART_CLOSE_MS = 1500  # 換風格重新啟動時，舊視窗最晚在新的一份啟動後這麼久關閉
 USAGE_URL = "https://github.com/MinHao1103/DayNote#怎麼用"  # README 的完整操作說明
 # 使用說明視窗的內容：(按鍵, 功能)；全域快捷鍵（F8、Ctrl + Alt + D）在其他程式裡也有效
 HELP_SHORTCUTS = (
@@ -140,7 +138,8 @@ HOLIDAY_RED = "#a44c54"   # 週末與國定假日的日期數字
 HOLIDAY_RED_FADED = "#e4c0c0"  # 其他月份的週末／假日
 FESTIVAL = "#e2b766"      # 粉彩赭黃：一般節日（不放假）的角標
 GRAY = "#72665a"     # 暖灰：在奶油底對比 5.0:1、米色欄位 4.6:1
-# ---- 風格（配色＋標題字型）：「⋯」→「風格」選擇，存在 state.json 的 theme，重新啟動後套用
+# ---- 風格（配色＋標題字型）：「⋯」→「風格」選擇，立即套用並存在 state.json 的 theme
+# 元件建立時才讀取這些常數（不要寫成函式參數預設值或類別屬性），換風格時重建畫面即可換色
 # 每種風格的文字用色（TEXT、GRAY、ACCENT、RED、HOLIDAY_RED）在 BG 與 CARD_BG 上對比皆 ≥ 4.5:1（有單元測試檢查）
 # fonts：title／heading＝標題字級；serif＝標題用思源宋體（沒安裝時維持正黑體）
 THEMES = {
@@ -175,7 +174,7 @@ THEME_FONTS = THEMES[DEFAULT_THEME]["fonts"]
 
 
 def apply_theme(key):
-    """把風格的配色寫進模組常數；必須在建立任何元件（以及 Pill 等類別定義）之前呼叫。不認得的風格用預設。"""
+    """把風格的配色寫進模組常數；之後建立的元件就會用新配色。不認得的風格用預設。"""
     global CURRENT_THEME, THEME_FONTS
     theme = THEMES.get(key) or THEMES[DEFAULT_THEME]
     CURRENT_THEME = key if key in THEMES else DEFAULT_THEME
@@ -1437,13 +1436,16 @@ class Pill(tk.Canvas):
     文字開頭的符號（📅 ⏰ 🔁 📁 ＋ ✓ ←）與結尾的「 ▾」改畫成單色線條圖示，和文字分開垂直置中。
     """
 
-    STYLES = {"primary": (ACCENT, ON_ACCENT, ACCENT_HOVER, None),
-              "soft": (ACCENT_SOFT, ACCENT, ACCENT_SOFT_HOVER, None),
-              "outline": (BG, TEXT, HOVER, BORDER),
-              "ghost": (BG, GRAY, HOVER, None)}
+    @staticmethod
+    def palette(style):
+        """樣式的 (底色, 文字色, 滑過底色, 外框色)；呼叫時才讀取，換風格後新建的按鈕就是新配色。"""
+        return {"primary": (ACCENT, ON_ACCENT, ACCENT_HOVER, None),
+                "soft": (ACCENT_SOFT, ACCENT, ACCENT_SOFT_HOVER, None),
+                "outline": (BG, TEXT, HOVER, BORDER),
+                "ghost": (BG, GRAY, HOVER, None)}[style]
 
     def __init__(self, parent, text, command, style="primary", font=FONT, padx=14, pady=5, bg=None):
-        self.fill, self.fg, self.hover_fill, self.outline = self.STYLES[style]
+        self.fill, self.fg, self.hover_fill, self.outline = self.palette(style)
         self.parent_bg = bg or parent.cget("bg")
         if style == "ghost":
             self.fill = self.parent_bg
@@ -1485,7 +1487,8 @@ class ThinScrollbar(tk.Canvas):
 
     WIDTH = 6
 
-    def __init__(self, parent, command, bg=BG):
+    def __init__(self, parent, command, bg=None):
+        bg = bg or BG
         super().__init__(parent, width=px(self.WIDTH), bg=bg, highlightthickness=0)
         self.command, self.bg = command, bg
         self.first, self.last = 0.0, 1.0
@@ -1541,7 +1544,8 @@ class ThinScrollbar(tk.Canvas):
 class RoundedBox(tk.Canvas):
     """圓角外框容器：內容放在 self.inner（Frame），高度跟著內容、寬度跟著版面；可切換外框顏色（例如取得焦點時）。"""
 
-    def __init__(self, parent, fill=BG, outline=BORDER, radius=16, padx=8, pady=4, bg=None):
+    def __init__(self, parent, fill=None, outline=None, radius=16, padx=8, pady=4, bg=None):
+        fill, outline = fill or BG, outline or BORDER
         self.fill, self.outline, self.radius = fill, outline, px(radius)
         self.parent_bg = bg or parent.cget("bg")
         self.padx, self.pady = px(padx), px(pady)
@@ -1753,7 +1757,8 @@ class _Popup:
         if not (wx <= x < wx + self.win.winfo_width() and wy <= y < wy + self.win.winfo_height()):
             self.close()
 
-    def _link(self, parent, text, command, fg=ACCENT, font=SMALL):
+    def _link(self, parent, text, command, fg=None, font=SMALL):
+        fg = fg or ACCENT
         lbl = tk.Label(parent, text=text, bg=CARD_BG, fg=fg, font=font, cursor="hand2", padx=px(4))
         lbl.bind("<Button-1>", lambda e: command())
         return lbl
@@ -2569,22 +2574,51 @@ class App(tk.Tk):
         save_state(state)
 
     def set_theme(self, key):
-        """換風格：記住選擇後重新啟動 DayNote 套用（畫面所有顏色在建立時就決定，無法即時替換）。"""
+        """換風格：記住選擇並立即重建畫面套用。從選單呼叫時，等選單收起後才重建（不在選單自己的回呼中刪除它）。"""
         if key == CURRENT_THEME or key not in THEMES:
             return
         self.state_data["theme"] = key
-        self._save_window_state()
-        self._set_status(f"正在換成「{THEMES[key]['name']}」…")
-        self.restart()
+        save_state(self.state_data)
+        self.after_idle(lambda: self._rebuild_ui(key))
 
-    def restart(self):
-        """開新的一份 DayNote；新的寫入 PID 後舊的會自行存檔關閉，保險起見稍後也主動關閉。"""
-        try:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=ROOT_DIR)
-        except OSError:
-            self._set_status("無法自動重新啟動，請關閉後重新打開 DayNote 套用新風格", error=True)
-            return
-        self.after(RESTART_CLOSE_MS, lambda: self.close(ask=False))
+    def _rebuild_ui(self, key):
+        """套用風格後重建所有畫面元件；任務、清單、選中的日期與編輯中的內容都保留。
+
+        提醒視窗維持原樣（關掉後下一則就是新配色），快速列、說明等其他小視窗直接關閉。
+        """
+        if self.draft:
+            self.draft["title_draft"] = self.draft_title.get()
+            self.draft["notes_draft"] = self.draft_notes.get("1.0", "end-1c")
+        elif self.detail:
+            self.detail["title_draft"] = self.detail_title.get()
+            self.detail["notes_draft"] = self.detail_notes.get("1.0", "end-1c")
+        status = self.status.cget("text")
+        self._hide_undo()
+        apply_theme(key)
+        apply_fonts(self)
+        keep = {toast.win for toast in ReminderToast.active}
+        for widget in self.winfo_children():
+            if widget not in keep:
+                widget.destroy()
+        self.configure(bg=BG, highlightbackground=BORDER)
+        self._build()
+        self._bind_shortcuts()  # 月曆、清單點擊取得焦點的綁定掛在新建的元件上
+        self._show_login_button(not self.g.refresh_token)
+        if self.draft:
+            self.main_view.pack_forget()
+            self._render_new_task()
+            self.detail_view.pack(fill="both", expand=True)
+            self.lbl_date.config(text="新增工作")
+        elif self.detail:
+            self.main_view.pack_forget()
+            self._render_detail()
+            self.detail_view.pack(fill="both", expand=True)
+            self.lbl_date.config(text="工作詳細資訊")
+        else:
+            self.redraw()
+        if self.borderless:
+            win_border_color(self, BORDER)
+        self._set_status(f"已換成「{THEMES[key]['name']}」" if status.startswith(("已同步", "正在換成")) else status)
 
     def _flush_detail_on_close(self, ask=True):
         """關閉前若詳細頁有未儲存的修改：詢問儲存／不儲存／取消。可以繼續關閉時回傳 True。
@@ -2649,7 +2683,7 @@ class App(tk.Tk):
         self.menu_more = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
                                  activeforeground=TEXT, bd=0, relief="flat", font=FONT)
         self.menu_more.add_command(label="使用說明與快捷鍵（F1）", command=self.open_help)
-        # 風格：單選，目前的風格前面打勾；換風格要重建整個畫面，所以會重新啟動 DayNote
+        # 風格：單選，目前的風格前面打勾；選了立即套用
         self.menu_theme = tk.Menu(self.menu_more, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
                                   activeforeground=TEXT, bd=0, relief="flat", font=FONT)
         self.theme_var = tk.StringVar(self, value=CURRENT_THEME)
@@ -2978,13 +3012,14 @@ class App(tk.Tk):
         tk.Label(box, text="登入後才能讀取與新增工作", bg=BG, fg=GRAY, font=SMALL).pack(pady=(px(4), px(12)))
         Pill(box, "登入 Google", self.login, style="primary", padx=20).pack()
 
-    def _section_header(self, text, expanded, toggle, fg=ACCENT, action=None):
+    def _section_header(self, text, expanded, toggle, fg=None, action=None):
         """可收合區塊的標題列（逾期、未排日期）：左邊標題＋淡色數量，右邊收合箭頭，整列可點。
 
         text 形如「逾期（1）」；標題 Label 的 text_value 保留「▼ 逾期（1）」，供測試辨識。
         action＝(文字, 函式)：收合箭頭左邊的動作連結（例如「全部移到今天」），點它不會收合區塊。
         @return 動作連結的 Label；沒有 action 時回傳 None
         """
+        fg = fg or ACCENT
         full = f"{'▼' if expanded else '▶'} {text}"
         name, _, count = text.rstrip("）").partition("（")
         header = tk.Frame(self.list_frame, bg=BG, cursor="hand2")
@@ -3044,12 +3079,13 @@ class App(tk.Tk):
             self._card(child["title"], "", child, indent=True, at=time_text(child.get("time")),
                        at_fg=RED if is_late(child, now) else GRAY)
 
-    def _card(self, title, subtitle, task, indent=False, subtitle_fg=GRAY, at="", at_fg=GRAY):
+    def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None):
         """清單中的一列（扁平樣式，比照 Google Tasks：無外框，列與列之間以細線分隔）。
 
         task 為 None 時是日曆行程：左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
         at＝右側時間欄文字（14:00、全天）；行程與待辦的時間都靠右對齊，掃一眼就能讀出順序。
         """
+        subtitle_fg, at_fg = subtitle_fg or GRAY, at_fg or GRAY
         row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(44))
         row.pack(fill="x", padx=(CHILD_INDENT if indent else 0, 0))
         inner = tk.Frame(row, bg=BG)
@@ -3109,8 +3145,9 @@ class App(tk.Tk):
         if not (0 <= x < row.winfo_width() and 0 <= y < row.winfo_height()):
             _set_bg(row, BG)
 
-    def _check_circle(self, parent, task, bg=CARD_BG):
+    def _check_circle(self, parent, task, bg=None):
         """To Do 風格的圓圈：滑鼠移上去顯示 ✓，點擊後填滿並標記完成。"""
+        bg = bg or CARD_BG
         size, mid = px(22), px(22) / 2
         c = tk.Canvas(parent, width=size, height=size, bg=bg, highlightthickness=0, cursor="hand2")
         d = size - px(2)  # 外框外緣直徑，和原本 create_oval 畫出來的大小相同

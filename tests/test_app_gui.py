@@ -451,23 +451,54 @@ class StartupTest(AppTestCase):
         # Then: 關閉
         self.assertFalse(app.help_win.winfo_exists())
 
-    def test_theme_menu_saves_and_restarts(self):
-        """「⋯」→「風格」選墨夜 > 記住風格並重新啟動；選目前的風格 > 什麼都不做"""
-        # Given: 已啟動（預設奶油陶土），重新啟動換成記錄
+    def use_theme_cleanup(self):
+        """換風格會改到模組的顏色與字型常數；測試結束後還原成預設，避免影響其他案例。"""
+        fonts = (daynote.TITLE_FONT, daynote.HEADING_FONT, daynote.SUBJECT_FONT)
+
+        def restore():
+            daynote.apply_theme(daynote.DEFAULT_THEME)
+            daynote.TITLE_FONT, daynote.HEADING_FONT, daynote.SUBJECT_FONT = fonts
+        self.addCleanup(restore)
+
+    def test_theme_switches_instantly(self):
+        """「⋯」→「風格」選墨夜 > 不重新啟動就換色、記住選擇，清單內容照常顯示"""
+        # Given: 已啟動（預設奶油陶土），今天有一筆任務
+        self.use_theme_cleanup()
+        self.g.seed("寫週報", self.today)
         app = self.start()
-        restarted = []
-        app.restart = lambda: restarted.append(True)
         # When: 選目前的風格
         app.menu_theme.invoke("奶油陶土")
-        # Then: 不重新啟動
-        self.assertEqual(restarted, [])
+        pump(app, 0.1)
+        # Then: 不變
+        self.assertEqual(app.cget("bg"), daynote.THEMES["cream"]["colors"]["BG"])
         # When: 選墨夜
         app.menu_theme.invoke("墨夜（深色）")
-        # Then: 已存檔並重新啟動
+        pump(app, 0.2)
+        # Then: 立即換色、已存檔、任務仍在、選單打勾在墨夜
+        night = daynote.THEMES["night"]["colors"]
+        self.assertEqual(app.cget("bg"), night["BG"])
+        self.assertEqual(app.lbl_date.cget("fg"), night["TEXT"])
+        self.assertIn("寫週報", self.list_texts())
+        self.assertEqual(app.theme_var.get(), "night")
         with open(os.path.join(self.tmp, "state.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["theme"], "night")
-        self.assertEqual(restarted, [True])
-        self.assertEqual(self.status(), "正在換成「墨夜（深色）」…")
+        self.assertEqual(self.status(), "已換成「墨夜（深色）」")
+
+    def test_theme_switch_keeps_detail_edits(self):
+        """詳細頁打到一半換風格 > 回到同一頁，打的字還在"""
+        # Given: 詳細頁改了標題但還沒儲存
+        self.use_theme_cleanup()
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        app.open_detail(app.tasks[0])
+        app.detail_title.insert("end", "（急）")
+        # When: 換成北歐極簡
+        app.menu_theme.invoke("北歐極簡")
+        pump(app, 0.2)
+        # Then: 仍在詳細頁，標題保留
+        self.assertTrue(app.detail_view.winfo_ismapped())
+        self.assertEqual(app.detail_title.get(), "寫週報（急）")
+        self.assertEqual(app.cget("bg"), daynote.THEMES["nordic"]["colors"]["BG"])
 
     def test_f1_opens_help_once(self):
         """按 F1 兩次 > 只開一個說明視窗"""
