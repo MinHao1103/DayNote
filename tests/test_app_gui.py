@@ -484,6 +484,48 @@ class StartupTest(AppTestCase):
             self.assertEqual(json.load(f)["theme"], "night")
         self.assertEqual(self.status(), "已換成「墨夜（深色）」")
 
+    def test_follow_windows_theme(self):
+        """選「跟隨 Windows」 > 系統深色時換成墨夜；系統切回淺色 > 自動換回奶油陶土"""
+        # Given: 已啟動（奶油陶土），系統是深色
+        self.use_theme_cleanup()
+        dark = {"on": True}
+        with unittest.mock.patch.object(daynote, "system_is_dark", lambda: dark["on"]):
+            app = self.start()
+            # When: 選跟隨 Windows
+            app.menu_theme.invoke(daynote.AUTO_THEME_NAME)
+            pump(app, 0.2)
+            # Then: 換成墨夜，記住的是 auto
+            self.assertEqual(app.cget("bg"), daynote.THEMES["night"]["colors"]["BG"])
+            self.assertEqual(app.state_data["theme"], "auto")
+            self.assertEqual(app.theme_var.get(), "auto")
+            # When: 系統切回淺色，定時檢查觸發
+            dark["on"] = False
+            app._follow_system_theme()
+            pump(app, 0.2)
+            # Then: 換回奶油陶土
+            self.assertEqual(app.cget("bg"), daynote.THEMES["cream"]["colors"]["BG"])
+
+    def test_calendar_hover_highlight(self):
+        """滑鼠移到月曆日期 > 該格出現淡色底；移出月曆 > 清掉"""
+        # Given: 已啟動
+        app = self.start()
+        tomorrow = self.today + dt.timedelta(days=1)
+        if tomorrow not in [d for w in app.weeks for d in w]:
+            self.skipTest("明天不在目前顯示的週")
+        left, top, right, _ = app._cal_cell_rect(tomorrow)
+        # When: 移到明天
+        app.cal.event_generate("<Motion>", x=(left + right) // 2, y=top + 5)
+        app.update()
+        # Then: 有滑過底色
+        self.assertEqual(app.cal_hover, tomorrow)
+        self.assertTrue(app.cal.find_withtag("hover"))
+        # When: 移出
+        app.cal.event_generate("<Leave>")
+        app.update()
+        # Then: 清掉
+        self.assertIsNone(app.cal_hover)
+        self.assertFalse(app.cal.find_withtag("hover"))
+
     def test_theme_switch_keeps_detail_edits(self):
         """詳細頁打到一半換風格 > 回到同一頁，打的字還在"""
         # Given: 詳細頁改了標題但還沒儲存

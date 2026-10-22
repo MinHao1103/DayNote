@@ -1248,6 +1248,18 @@ class ThemeTest(unittest.TestCase):
                     # Then: ≥ 4.5
                     self.assertGreaterEqual(round(ratio, 2), 4.5)
 
+    def test_resolve_theme(self):
+        """跟隨 Windows > 淺色用奶油陶土、深色用墨夜；指定的風格不受系統影響；不認得的用預設"""
+        cases = [("auto", False, "cream"), ("auto", True, "night"), ("nordic", True, "nordic"),
+                 ("editorial", False, "editorial"), ("沒有這個", True, "cream")]
+        for choice, dark, expected in cases:
+            with self.subTest(choice=choice, dark=dark):
+                # Given: 使用者的選擇與系統深淺色
+                # When: 決定實際配色
+                result = daynote.resolve_theme(choice, dark)
+                # Then: 正確
+                self.assertEqual(result, expected)
+
     def test_default_matches_module_colors(self):
         """預設風格 > 和模組目前的顏色常數一致（測試以預設風格執行）"""
         for name, value in daynote.THEMES[daynote.DEFAULT_THEME]["colors"].items():

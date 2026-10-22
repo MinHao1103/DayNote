@@ -31,6 +31,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import winreg
 import winsound
 from ctypes import wintypes
 from tkinter import filedialog, messagebox, ttk
@@ -171,6 +172,32 @@ THEMES = {
 DEFAULT_THEME = "cream"
 CURRENT_THEME = DEFAULT_THEME
 THEME_FONTS = THEMES[DEFAULT_THEME]["fonts"]
+AUTO_THEME = "auto"   # 跟隨 Windows 的淺色／深色模式（不是一組配色，套用時換成下面兩種之一）
+AUTO_THEME_NAME = "跟隨 Windows（淺色／深色）"
+AUTO_LIGHT, AUTO_DARK = "cream", "night"
+SYSTEM_THEME_CHECK_MS = 60 * 1000  # 跟隨 Windows 時，每分鐘檢查一次系統是否切換了淺色／深色
+
+
+def system_is_dark():
+    """Windows「應用程式模式」是否為深色（登錄檔 AppsUseLightTheme = 0）；讀不到時視為淺色。"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False
+
+
+def resolve_theme(choice, dark):
+    """使用者的選擇 → 實際套用的配色：「跟隨 Windows」依系統深淺色決定，不認得的選擇用預設。
+
+    @param choice 使用者選的風格（THEMES 的 key 或 AUTO_THEME）
+    @param dark 系統目前是否為深色
+    @return THEMES 的 key
+    """
+    if choice == AUTO_THEME:
+        return AUTO_DARK if dark else AUTO_LIGHT
+    return choice if choice in THEMES else DEFAULT_THEME
 
 
 def apply_theme(key):
@@ -195,7 +222,7 @@ def saved_theme():
 
 # 直接執行（或截圖工具指定風格）時才套用；測試以模組載入，維持預設風格
 if __name__ == "__main__" or os.environ.get("DAYNOTE_THEME"):
-    apply_theme(saved_theme())
+    apply_theme(resolve_theme(saved_theme(), system_is_dark()))
 
 FONT = (UI_FONT, 10)
 SMALL = (UI_FONT, 8)
@@ -2386,6 +2413,7 @@ class App(tk.Tk):
         self.after(50, self._apply_win_style)
         self.after(100, self._poll_queue)
         self.after(NEXT_UP_TICK_MS, self._tick_next_up)
+        self.after(SYSTEM_THEME_CHECK_MS, self._follow_system_theme)
         self.bind("<FocusIn>", self._on_focus)
         self._bind_shortcuts()
         if desktop_reminder:
@@ -2573,13 +2601,29 @@ class App(tk.Tk):
                          w=self.winfo_width(), h=self.winfo_height())
         save_state(state)
 
-    def set_theme(self, key):
-        """換風格：記住選擇並立即重建畫面套用。從選單呼叫時，等選單收起後才重建（不在選單自己的回呼中刪除它）。"""
-        if key == CURRENT_THEME or key not in THEMES:
+    def set_theme(self, choice):
+        """換風格：記住選擇並立即重建畫面套用。從選單呼叫時，等選單收起後才重建（不在選單自己的回呼中刪除它）。
+
+        choice 可以是 THEMES 的 key，或 AUTO_THEME（跟隨 Windows 淺色／深色）。
+        """
+        if choice != AUTO_THEME and choice not in THEMES:
             return
-        self.state_data["theme"] = key
+        self.state_data["theme"] = choice
         save_state(self.state_data)
+        key = resolve_theme(choice, system_is_dark())
+        if key == CURRENT_THEME:  # 配色沒變（例如淺色模式下改成跟隨 Windows）：只更新提示
+            name = THEMES[key]["name"]
+            self._set_status(f"已改成跟隨 Windows（目前「{name}」）" if choice == AUTO_THEME else f"已是「{name}」")
+            return
         self.after_idle(lambda: self._rebuild_ui(key))
+
+    def _follow_system_theme(self):
+        """跟隨 Windows 時，系統切換淺色／深色後自動換配色。"""
+        if self.state_data.get("theme") == AUTO_THEME and not self.draft and not self.detail:
+            key = resolve_theme(AUTO_THEME, system_is_dark())
+            if key != CURRENT_THEME:
+                self._rebuild_ui(key)
+        self.after(SYSTEM_THEME_CHECK_MS, self._follow_system_theme)
 
     def _rebuild_ui(self, key):
         """套用風格後重建所有畫面元件；任務、清單、選中的日期與編輯中的內容都保留。
@@ -2592,7 +2636,7 @@ class App(tk.Tk):
         elif self.detail:
             self.detail["title_draft"] = self.detail_title.get()
             self.detail["notes_draft"] = self.detail_notes.get("1.0", "end-1c")
-        status = self.status.cget("text")
+        status, status_is_error = self.status.cget("text"), self.status.cget("fg") == RED
         self._hide_undo()
         apply_theme(key)
         apply_fonts(self)
@@ -2618,7 +2662,10 @@ class App(tk.Tk):
             self.redraw()
         if self.borderless:
             win_border_color(self, BORDER)
-        self._set_status(f"已換成「{THEMES[key]['name']}」" if status.startswith(("已同步", "正在換成")) else status)
+        if status_is_error:  # 錯誤訊息（例如同步失敗）要留著，不被換風格的提示蓋掉
+            self._set_status(status, error=True)
+        else:
+            self._set_status(f"已換成「{THEMES[key]['name']}」")
 
     def _flush_detail_on_close(self, ask=True):
         """關閉前若詳細頁有未儲存的修改：詢問儲存／不儲存／取消。可以繼續關閉時回傳 True。
@@ -2686,7 +2733,10 @@ class App(tk.Tk):
         # 風格：單選，目前的風格前面打勾；選了立即套用
         self.menu_theme = tk.Menu(self.menu_more, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
                                   activeforeground=TEXT, bd=0, relief="flat", font=FONT)
-        self.theme_var = tk.StringVar(self, value=CURRENT_THEME)
+        self.theme_var = tk.StringVar(self, value=self.state_data.get("theme", CURRENT_THEME))
+        self.menu_theme.add_radiobutton(label=AUTO_THEME_NAME, value=AUTO_THEME, variable=self.theme_var,
+                                        command=lambda: self.set_theme(AUTO_THEME))
+        self.menu_theme.add_separator()
         for key, theme in THEMES.items():
             self.menu_theme.add_radiobutton(label=theme["name"], value=key, variable=self.theme_var,
                                             command=lambda k=key: self.set_theme(k))
@@ -2746,9 +2796,13 @@ class App(tk.Tk):
                           tip=lambda: "上一週" if self.compact else "上個月").pack(side="right")
 
         self.cal = tk.Canvas(self.main_view, width=7 * CELL_W, height=HEAD_H + 6 * CELL_H,
-                             bg=BG, highlightthickness=0)
+                             bg=BG, highlightthickness=0, cursor="hand2")
         self.cal.pack(pady=px(4))
         self.cal.bind("<Button-1>", self._on_cal_click)
+        # 滑過日期時出現圓角細外框，提示可以點
+        self.cal_hover = None
+        self.cal.bind("<Motion>", self._on_cal_hover, add="+")
+        self.cal.bind("<Leave>", lambda e: self._paint_cal_hover(None), add="+")
         # 滑鼠停在日期上說明當天有什麼，第一次用的人不必猜圓點顏色的意思
         self.cal_tooltip = CellTooltip(self.cal, self._cal_cell_at, self._day_tip_text, self._cal_cell_rect)
 
@@ -2845,6 +2899,7 @@ class App(tk.Tk):
     def _draw_calendar(self):
         c = self.cal
         c.delete("all")
+        self.cal_hover = None  # 重畫後滑過底色要重新畫
         year, month = self.view
         self.lbl_month.config(text=f"{year} 年 {month} 月")
         for i, name in enumerate(WEEK_HEAD):
@@ -3700,6 +3755,24 @@ class App(tk.Tk):
         if y >= HEAD_H and 0 <= row < len(self.weeks) and 0 <= col < 7:
             return self.weeks[row][col]
         return None
+
+    def _on_cal_hover(self, event):
+        self._paint_cal_hover(self._cal_cell_at(event.x, event.y))
+
+    def _paint_cal_hover(self, day):
+        """在滑過的日期畫圓角細外框（選中的日期已有底色就不畫）；None 表示清掉。"""
+        if day == self.cal_hover:
+            return
+        self.cal_hover = day
+        self.cal.delete("hover")
+        if day is None or day == self.selected:
+            return
+        left, top, _, _ = self._cal_cell_rect(day)
+        cy = top + px(17)  # 和 _draw_calendar 的選取框同一個中心點
+        # 只畫細外框不填色：和選中日期的實心底色區分，不會被誤認成已選取
+        draw_rounded(self.cal, CELL_W - px(4), px(32), px(16), BG, BG, outline=BORDER, tag="hover",
+                     x0=left + px(2), y0=cy - px(16))
+        self.cal.tag_lower("hover")
 
     def _cal_cell_rect(self, day):
         for row, week in enumerate(self.weeks):
