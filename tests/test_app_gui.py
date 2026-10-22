@@ -586,6 +586,42 @@ class StartupTest(AppTestCase):
         self.assertTrue(menu.is_open())
         menu.close()
 
+    def test_themed_dialog_buttons(self):
+        """圓角對話框 > 按「刪除」回傳 True；按 Esc 回傳取消的值；按鈕文字依情境"""
+        # Given: 已啟動
+        app = self.start()
+        dialog = daynote.ThemedMessageBox()
+        # When: 打開刪除確認，0.3 秒後按「刪除」
+        app.after(300, lambda: click(find_label(app._active_dialog, "刪除")))
+        result = dialog.askyesno("刪除工作", "確定刪除？", parent=app, icon="warning", yes="刪除", no="取消")
+        # Then: True
+        self.assertIs(result, True)
+        # When: 打開尚未儲存，0.3 秒後按 Esc
+        app.after(300, lambda: app._active_dialog.event_generate("<Escape>"))
+        result = dialog.askyesnocancel("尚未儲存", "要儲存嗎？", parent=app, yes="儲存", no="不儲存")
+        # Then: None（取消）
+        self.assertIsNone(result)
+
+    def test_ask_text_returns_typed_name(self):
+        """新增清單的輸入框 > 打字後按 Enter 回傳文字；按取消回傳 None"""
+        # Given: 已啟動
+        app = self.start()
+
+        def type_and_enter():
+            entry = next(w for w in descendants(app._active_dialog) if isinstance(w, tk.Entry))
+            entry.insert(0, "旅行")
+            entry.event_generate("<Return>")
+        # When: 打「旅行」按 Enter
+        app.after(300, type_and_enter)
+        name = daynote.ask_text(app, "新增清單", "清單名稱：")
+        # Then: 回傳文字
+        self.assertEqual(name, "旅行")
+        # When: 按取消
+        app.after(300, lambda: click(find_label(app._active_dialog, "取消")))
+        name = daynote.ask_text(app, "新增清單", "清單名稱：")
+        # Then: None
+        self.assertIsNone(name)
+
     def test_f1_opens_help_once(self):
         """按 F1 兩次 > 只開一個說明視窗"""
         # Given: 已啟動

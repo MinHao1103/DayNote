@@ -10,6 +10,7 @@
     daytip     滑鼠停在今天的日期上（月曆提示）  help       使用說明與快捷鍵（F1）
     datepicker／timepicker／recurpicker  詳細頁的日期／提醒時間／重複選擇器
     moremenu   「⋯」選單（展開「風格」子選單）  taskmenu   待辦的右鍵選單  snoozemenu  提醒的延後選單
+    confirm    刪除確認對話框                    asktext    新增清單的名稱輸入框
     detail     工作詳細資訊                  new        新增工作
     loggedout  尚未登入                      quick      快速列（Ctrl + Alt + D）
     quicktype  快速列輸入中（顯示辨識結果）  toast      右下角提醒
@@ -42,7 +43,7 @@ if "--theme" in sys.argv[:-1]:
 from tests.test_app_gui import HOLIDAY_CAL, StoreGoogle, daynote, pump, settle  # noqa: E402
 
 PAGES = ("main", "month", "daytip", "help", "datepicker", "timepicker", "recurpicker", "moremenu", "taskmenu",
-         "snoozemenu", "detail", "new", "loggedout", "quick", "quicktype", "toast")
+         "snoozemenu", "confirm", "asktext", "detail", "new", "loggedout", "quick", "quicktype", "toast")
 DEFAULT_OUT = os.path.join(ROOT, "docs", "images", "00-app.png")
 
 
@@ -162,6 +163,23 @@ def open_page(app, g, page, today):
         toast._open_snooze_menu()
         app.update()
         return [toast.win, toast.snooze_menu.win]
+    elif page in ("confirm", "asktext"):
+        shot = {}
+
+        def capture():  # 對話框會等使用者回應，所以在它開著的時候截圖再關掉
+            dialog = app._active_dialog
+            pump(app, 0.8)
+            dialog.update_idletasks()
+            shot["rect"] = (dialog.winfo_rootx(), dialog.winfo_rooty(), dialog.winfo_width(), dialog.winfo_height())
+            shot["rows"] = grab(*shot["rect"])
+            dialog.event_generate("<Escape>")
+        app.after(300, capture)
+        if page == "confirm":
+            daynote.ThemedMessageBox.askyesno("刪除工作", daynote.delete_prompt(app.tasks[0], 0), parent=app,
+                                              icon="warning", yes="刪除", no="取消")
+        else:
+            daynote.ask_text(app, "新增清單", "清單名稱：")
+        return shot
     elif page == "help":
         app.open_help()
         return app.help_win
@@ -238,6 +256,12 @@ def main():
         app.geometry(f"{daynote.px(args.width)}x{app.winfo_height()}")
         pump(app, 0.3)
     target = open_page(app, g, args.page, today)
+    if isinstance(target, dict):  # 對話框：已在開著的時候截好
+        x, y, w, h = target["rect"]
+        write_png(args.out, target["rows"], w, h)
+        app.destroy()
+        print(f"已存檔：{args.out}（{w}×{h}）")
+        return
     pump(app, 0.8)  # 等視窗與 DWM 圓角、陰影畫完
     windows = target if isinstance(target, list) else [target]  # 選單等多個視窗：截下全部的聯集
     for win in windows:

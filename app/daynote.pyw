@@ -34,7 +34,8 @@ import webbrowser
 import winreg
 import winsound
 from ctypes import wintypes
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
+from tkinter import messagebox as native_messagebox  # 只用在主視窗建立之前（設定檔錯誤）；之後改用 ThemedMessageBox
 from tkinter import font as tkfont
 
 APP = "DayNote"
@@ -1469,7 +1470,8 @@ class Pill(tk.Canvas):
         return {"primary": (ACCENT, ON_ACCENT, ACCENT_HOVER, None),
                 "soft": (ACCENT_SOFT, ACCENT, ACCENT_SOFT_HOVER, None),
                 "outline": (BG, TEXT, HOVER, BORDER),
-                "ghost": (BG, GRAY, HOVER, None)}[style]
+                "ghost": (BG, GRAY, HOVER, None),
+                "danger": (RED, ON_ACCENT, RED, None)}[style]
 
     def __init__(self, parent, text, command, style="primary", font=FONT, padx=14, pady=5, bg=None):
         self.fill, self.fg, self.hover_fill, self.outline = self.palette(style)
@@ -2502,32 +2504,105 @@ class QuickBar:
         self.app.show_main(task)
 
 
-def ask_text(parent, title, prompt, ok_text="建立"):
-    """中文按鈕的單行輸入框（tkinter 內建 simpledialog 的按鈕固定是英文）。取消回傳 None。"""
+def themed_dialog(parent, title, message, buttons, default, cancel, icon=None):
+    """跟著風格的圓角對話框（取代 Windows 原生 messagebox：深色風格下不會跳出白色系統視窗）。
+
+    @param parent 置中的視窗；None 表示主視窗
+    @param buttons [(文字, 回傳值, Pill 樣式)]，由左到右排列；主要按鈕放最右邊
+    @param default 按 Enter 的回傳值
+    @param cancel 按 Esc 的回傳值
+    @param icon "warning" 時標題用紅色
+    @return 按下的按鈕的回傳值
+    """
+    parent = parent or tk._default_root
     win = tk.Toplevel(parent)
-    win.title(title)
-    win.configure(bg=BG, padx=px(16), pady=px(12))
-    win.resizable(False, False)
-    win.transient(parent)
+    win.overrideredirect(True)
     win.attributes("-topmost", True)
-    tk.Label(win, text=prompt, bg=BG, fg=TEXT, font=FONT, anchor="w").pack(fill="x")
-    entry = tk.Entry(win, font=FONT, width=24, relief="flat", bg=CARD_BG, fg=TEXT, insertbackground=TEXT,
-                     highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
-    entry.pack(fill="x", pady=(px(6), px(12)), ipady=px(3))
+    win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
+    body = tk.Frame(win, bg=BG, padx=px(22), pady=px(18))
+    body.pack(fill="both", expand=True)
+    tk.Label(body, text=title, bg=BG, fg=RED if icon == "warning" else TEXT, font=HEADING_FONT,
+             anchor="w").pack(fill="x")
+    tk.Label(body, text=message, bg=BG, fg=TEXT, font=FONT, anchor="w", justify="left",
+             wraplength=px(300)).pack(fill="x", pady=(px(8), px(16)))
+    row = tk.Frame(body, bg=BG)
+    row.pack(fill="x")
+    result = {"value": cancel}
+
+    def choose(value):
+        result["value"] = value
+        win.destroy()
+    for text, value, style in reversed(buttons):  # 由右往左 pack，主要按鈕在最右邊
+        Pill(row, text, lambda v=value: choose(v), style=style, padx=14, pady=4).pack(side="right", padx=(px(6), 0))
+    win.bind("<Return>", lambda e: choose(default))
+    win.bind("<Escape>", lambda e: choose(cancel))
+
+    win.update_idletasks()  # 置中在主視窗上（主視窗隱藏時置中在螢幕）
+    w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+    if parent.winfo_ismapped():
+        x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - h) // 3
+    else:
+        x, y = (win.winfo_screenwidth() - w) // 2, (win.winfo_screenheight() - h) // 3
+    win.geometry(f"+{x}+{y}")
+    win_style_popup(win)
+    parent._active_dialog = win  # 測試用：找到目前開著的對話框
+    win.focus_force()
+    win.grab_set()
+    parent.wait_window(win)
+    return result["value"]
+
+
+class ThemedMessageBox:
+    """介面相容 tkinter.messagebox 用到的部分，改用 themed_dialog；按鈕文字可依情境指定（例如「刪除」「取消」）。"""
+
+    @staticmethod
+    def askyesno(title, message, parent=None, icon=None, yes="是", no="否"):
+        danger = "danger" if icon == "warning" else "primary"  # 刪除、放棄、登出這類動作用紅色按鈕
+        return themed_dialog(parent, title, message, [(no, False, "outline"), (yes, True, danger)],
+                             default=True, cancel=False, icon=icon)
+
+    @staticmethod
+    def askyesnocancel(title, message, parent=None, icon=None, yes="是", no="否"):
+        return themed_dialog(parent, title, message,
+                             [("取消", None, "ghost"), (no, False, "outline"), (yes, True, "primary")],
+                             default=True, cancel=None, icon=icon)
+
+    @staticmethod
+    def showerror(title, message, parent=None):
+        themed_dialog(parent, title, message, [("知道了", None, "primary")], default=None, cancel=None,
+                      icon="warning")
+
+
+messagebox = ThemedMessageBox()  # 程式中的 messagebox.askyesno 等都改用圓角對話框
+
+
+def ask_text(parent, title, prompt, ok_text="建立"):
+    """中文按鈕的單行輸入框（tkinter 內建 simpledialog 的按鈕固定是英文），外觀和其他對話框一致。取消回傳 None。"""
+    win = tk.Toplevel(parent)
+    win.overrideredirect(True)
+    win.attributes("-topmost", True)
+    win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
+    body = tk.Frame(win, bg=BG, padx=px(22), pady=px(18))
+    body.pack(fill="both", expand=True)
+    tk.Label(body, text=title, bg=BG, fg=TEXT, font=HEADING_FONT, anchor="w").pack(fill="x")
+    tk.Label(body, text=prompt, bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(px(8), px(2)))
+    box = RoundedBox(body, fill=CARD_BG, outline=ACCENT, radius=12, padx=10, pady=5)
+    box.pack(fill="x", pady=(0, px(16)))
+    entry = tk.Entry(box.inner, font=FONT, width=26, relief="flat", bg=CARD_BG, fg=TEXT, insertbackground=TEXT,
+                     highlightthickness=0)
+    entry.pack(fill="x")
+    box.config(width=entry.winfo_reqwidth() + px(20))  # Canvas 預設會要求很寬，改成跟輸入框一樣寬
     result = {"value": None}
 
     def ok(_=None):
         result["value"] = entry.get()
         win.destroy()
 
-    buttons = tk.Frame(win, bg=BG)
-    buttons.pack(fill="x")
-    btn_ok = tk.Label(buttons, text=ok_text, bg=ACCENT, fg=ON_ACCENT, font=FONT, padx=px(14), pady=px(3), cursor="hand2")
-    btn_ok.pack(side="right")
-    btn_ok.bind("<Button-1>", ok)
-    btn_cancel = tk.Label(buttons, text="取消", bg=BG, fg=GRAY, font=FONT, padx=px(10), pady=px(3), cursor="hand2")
-    btn_cancel.pack(side="right", padx=(0, px(6)))
-    btn_cancel.bind("<Button-1>", lambda e: win.destroy())
+    row = tk.Frame(body, bg=BG)
+    row.pack(fill="x")
+    Pill(row, ok_text, ok, style="primary", padx=14, pady=4).pack(side="right")
+    Pill(row, "取消", win.destroy, style="outline", padx=14, pady=4).pack(side="right", padx=(0, px(6)))
     entry.bind("<Return>", ok)
     win.bind("<Escape>", lambda e: win.destroy())
 
@@ -2535,6 +2610,8 @@ def ask_text(parent, title, prompt, ok_text="建立"):
     x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_reqwidth()) // 2
     y = parent.winfo_rooty() + (parent.winfo_height() - win.winfo_reqheight()) // 3
     win.geometry(f"+{x}+{y}")
+    win_style_popup(win)
+    parent._active_dialog = win
     entry.focus_force()
     win.grab_set()
     parent.wait_window(win)
@@ -2908,7 +2985,8 @@ class App(tk.Tk):
         task = self.detail["task"]
         if ask:
             answer = messagebox.askyesnocancel(
-                "尚未儲存", f"「{task['title']}」有尚未儲存的修改，要先儲存再關閉嗎？", parent=self, icon="warning")
+                "尚未儲存", f"「{task['title']}」有尚未儲存的修改，要先儲存再關閉嗎？", parent=self, icon="warning",
+                yes="儲存", no="不儲存")
             if answer is None:
                 return False
             if not answer:
@@ -3648,7 +3726,8 @@ class App(tk.Tk):
         if not getattr(self, "draft", None):
             return True
         if ask and self._draft_has_content() and not messagebox.askyesno(
-                "放棄新增", "這筆工作還沒建立，確定要放棄嗎？", parent=self, icon="warning"):
+                "放棄新增", "這筆工作還沒建立，確定要放棄嗎？", parent=self, icon="warning",
+                yes="放棄", no="繼續編輯"):
             return False
         self.draft = None
         self.detail_view.pack_forget()
@@ -3889,7 +3968,8 @@ class App(tk.Tk):
     def delete_detail(self):
         task = self.detail["task"]
         children = [] if task.get("parent") else self._children(task)
-        if not messagebox.askyesno("刪除工作", delete_prompt(task, len(children)), parent=self, icon="warning"):
+        if not messagebox.askyesno("刪除工作", delete_prompt(task, len(children)), parent=self, icon="warning",
+                                   yes="刪除", no="取消"):
             return
         self.detail = None
         self.detail_view.pack_forget()
@@ -4249,7 +4329,7 @@ class App(tk.Tk):
         if self.busy or not self.g.refresh_token:
             return
         if not messagebox.askyesno("登出", "確定要登出 Google？\n\n會撤銷 DayNote 的存取權，並刪除這台電腦上的登入資料，"
-                                   "之後需要重新登入。", parent=self):
+                                   "之後需要重新登入。", parent=self, icon="warning", yes="登出", no="取消"):
             return
         self.close_detail()  # 詳細頁有修改時先儲存
         self.cancel_new_task(ask=False)  # 已確認登出，新增頁一併關閉
@@ -4505,7 +4585,7 @@ class App(tk.Tk):
         children = self._children(task)
         if children and not messagebox.askyesno(
                 "略過這一期", f"略過「{task['title']}」這一期？\n（含 {len(children)} 個子工作，會一併刪除）",
-                parent=self, icon="question"):
+                parent=self, icon="question", yes="略過", no="取消"):
             return
         group = children + [task]  # 先刪子工作再刪父工作
         for t in group:
@@ -4830,7 +4910,7 @@ def main():
     except (OSError, ValueError, KeyError) as e:
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror(APP, f"設定檔有誤：{e}\n\n請修正 data\\config.json，或刪除它後重新啟動以進行首次設定。")
+        native_messagebox.showerror(APP, f"設定檔有誤：{e}\n\n請修正 data\\config.json，或刪除它後重新啟動以進行首次設定。")
         return
     watch = write_pid()
     try:
