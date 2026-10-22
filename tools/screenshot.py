@@ -6,7 +6,7 @@
 
 可截的畫面（--page）：
     main       主畫面（預設，週檢視）        month      主畫面展開整月
-    daytip     滑鼠停在今天的日期上（月曆提示）
+    daytip     滑鼠停在今天的日期上（月曆提示）  help       使用說明與快捷鍵（F1）
     detail     工作詳細資訊                  new        新增工作
     loggedout  尚未登入                      quick      快速列（Ctrl + Alt + D）
     quicktype  快速列輸入中（顯示辨識結果）  toast      右下角提醒
@@ -35,7 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # DayNote �
 sys.path.insert(0, ROOT)
 from tests.test_app_gui import HOLIDAY_CAL, StoreGoogle, daynote, pump, settle  # noqa: E402
 
-PAGES = ("main", "month", "daytip", "detail", "new", "loggedout", "quick", "quicktype", "toast")
+PAGES = ("main", "month", "daytip", "help", "detail", "new", "loggedout", "quick", "quicktype", "toast")
 DEFAULT_OUT = os.path.join(ROOT, "docs", "images", "00-app.png")
 
 
@@ -127,6 +127,9 @@ def open_page(app, g, page, today):
         left, top, right, _ = app._cal_cell_rect(today)
         app.cal.event_generate("<Motion>", x=(left + right) // 2, y=top + 5)
         pump(app, 0.7)  # 提示在停留 0.5 秒後出現
+    elif page == "help":
+        app.open_help()
+        return app.help_win
     elif page == "detail":
         app.open_detail(next(t for t in app.tasks if t["title"] == "準備週會簡報"))
     elif page == "new":

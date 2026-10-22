@@ -103,6 +103,26 @@ REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
 NEXT_UP_TICK_MS = 60 * 1000      # 「下一件」摘要每分鐘更新
 FIRST_RUN_TIP = "小技巧：在待辦上按右鍵可以改日期；Ctrl + Alt + D 隨時快速新增"  # 第一次同步成功後在狀態列提示一次
 FIRST_RUN_TIP_MS = 15 * 1000
+USAGE_URL = "https://github.com/MinHao1103/DayNote#怎麼用"  # README 的完整操作說明
+# 使用說明視窗的內容：(按鍵, 功能)；全域快捷鍵（F8、Ctrl + Alt + D）在其他程式裡也有效
+HELP_SHORTCUTS = (
+    ("Ctrl + Alt + D", "在任何程式叫出快速列：新增、看今天、/ 搜尋"),
+    ("F8", "顯示／隱藏 DayNote"),
+    ("Ctrl + N", "游標移到新增輸入框"),
+    ("← →", "前一天／後一天"),
+    ("↑ ↓", "前一週／後一週"),
+    ("Home", "回到今天"),
+    ("F5", "立即同步"),
+    ("Esc", "離開詳細頁（有修改會自動儲存）"),
+    ("F1", "開啟這個說明"),
+)
+HELP_TIPS = (
+    "輸入框可以一次寫完：明天 3點 開會 每週二 #工作",
+    "點圓圈完成待辦，5 秒內可以按「復原」",
+    "在待辦上按右鍵：移到今天、明天或不排日期",
+    "滑鼠停在月曆日期上，看當天有幾件待辦、幾個行程",
+    "按月份旁的「展開整月」看整個月",
+)
 ADD_LIST_OPTION = "＋ 新增清單…"  # 清單下拉選單的最後一項
 SELECTED = "#f5e4d8"  # 月曆選中日期：粉彩蜜桃，和強調色同色系
 DIVIDER = "#efe7da"   # 清單列之間的細分隔線
@@ -2538,10 +2558,12 @@ class App(tk.Tk):
         # 不再緊鄰關閉鈕而誤按，右上角也只剩圖示按鈕，和 Windows 11 標題列一致
         self.menu_more = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
                                  activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        self.menu_more.add_command(label="使用說明與快捷鍵（F1）", command=self.open_help)
+        self.menu_more.add_separator()
         self.menu_more.add_command(label="立即同步（F5）", command=self.refresh)
         self.menu_more.add_separator()
         self.menu_more.add_command(label="登出 Google", command=self.logout)
-        self.btn_more = self._icon_button(tools, "⋯", self._open_more_menu, tip="更多：同步、登出")
+        self.btn_more = self._icon_button(tools, "⋯", self._open_more_menu, tip="更多：使用說明、同步、登出")
         self.btn_more.pack(side="left")
         self.btn_pin = self._icon_button(
             tools, "📌", self.toggle_topmost,
@@ -3675,12 +3697,66 @@ class App(tk.Tk):
         self.bind("<Control-n>", lambda e: self.detail or self.draft or self.entry.focus_force())
         self.bind("<Control-N>", lambda e: self.detail or self.draft or self.entry.focus_force())
         self.bind("<F5>", lambda e: self.refresh())
+        self.bind("<F1>", lambda e: self.open_help())
         for key, days in (("<Left>", -1), ("<Right>", 1), ("<Up>", -7), ("<Down>", 7)):
             self.bind(key, lambda e, d=days: self._shift_day(d))
         self.bind("<Home>", lambda e: self._shift_day(None))
         # 點月曆或清單時取得鍵盤焦點，方向鍵才有作用
         for widget in (self.cal, self.list_canvas):
             widget.bind("<Button-1>", lambda e, w=widget: w.focus_set(), add="+")
+
+    def open_help(self):
+        """使用說明視窗：快捷鍵＋常用操作，最下面連到 README 完整說明。已開著就移到最上層。"""
+        if getattr(self, "help_win", None) and self.help_win.winfo_exists():
+            self.help_win.lift()
+            return
+        win = self.help_win = tk.Toplevel(self)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        body = tk.Frame(win, bg=BG, padx=px(18), pady=px(14))
+        body.pack(fill="both", expand=True)
+
+        head = tk.Frame(body, bg=BG)
+        head.pack(fill="x")
+        tk.Label(head, text="使用說明", bg=BG, fg=TEXT, font=TITLE_FONT, anchor="w").pack(side="left")
+        close = self._icon_button(head, "✕", win.destroy, tip="關閉（Esc）")
+        close.pack(side="right")
+
+        tk.Label(body, text="快捷鍵", bg=BG, fg=ACCENT, font=HEADING_FONT, anchor="w").pack(
+            fill="x", pady=(px(10), px(4)))
+        keys = tk.Frame(body, bg=BG)
+        keys.pack(fill="x")
+        for row, (key, desc) in enumerate(HELP_SHORTCUTS):
+            tk.Label(keys, text=key, bg=CARD_BG, fg=TEXT, font=EVENT_TIME_FONT, padx=px(6), pady=px(1)).grid(
+                row=row, column=0, sticky="w", pady=px(2))
+            tk.Label(keys, text=desc, bg=BG, fg=TEXT, font=FONT, anchor="w").grid(
+                row=row, column=1, sticky="w", padx=(px(10), 0))
+
+        tk.Label(body, text="常用操作", bg=BG, fg=ACCENT, font=HEADING_FONT, anchor="w").pack(
+            fill="x", pady=(px(12), px(4)))
+        for tip in HELP_TIPS:
+            tk.Label(body, text=f"・{tip}", bg=BG, fg=TEXT, font=FONT, anchor="w", justify="left").pack(fill="x")
+
+        bottom = tk.Frame(body, bg=BG)
+        bottom.pack(fill="x", pady=(px(14), 0))
+        self.btn_help_more = Pill(bottom, "完整說明（GitHub）", lambda: webbrowser.open(USAGE_URL),
+                                  style="soft", padx=12, pady=3)
+        self.btn_help_more.pack(side="left")
+        Pill(bottom, "知道了", win.destroy, style="primary", padx=14, pady=3).pack(side="right")
+
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.update_idletasks()  # 置中在主視窗上；超出螢幕時往內收
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        y = self.winfo_rooty() + px(60)
+        screen = win_virtual_screen()
+        if screen:
+            x = min(max(x, screen[0]), screen[2] - w)
+            y = min(max(y, screen[1]), screen[3] - h)
+        win.geometry(f"+{x}+{y}")
+        win_style_popup(win)
+        win.focus_force()
 
     def _shift_day(self, days):
         if self.detail or self.draft or isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)):

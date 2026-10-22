@@ -427,6 +427,42 @@ class StartupTest(AppTestCase):
         self.assertFalse(app.btn_login.winfo_ismapped())
         self.assertEqual(app.menu_more.entrycget("登出 Google", "state"), "normal")
 
+    def test_help_window(self):
+        """「⋯」選單選使用說明 > 列出快捷鍵與常用操作；按完整說明 > 開啟 README；Esc 關閉"""
+        # Given: 已啟動
+        app = self.start()
+        opened = []
+        # When: 選單選使用說明
+        app.menu_more.invoke("使用說明與快捷鍵（F1）")
+        app.update()
+        # Then: 列出全域快捷鍵與右鍵改日期的說明
+        shown = texts(app.help_win)
+        self.assertIn("Ctrl + Alt + D", shown)
+        self.assertIn("F8", shown)
+        self.assertIn("・在待辦上按右鍵：移到今天、明天或不排日期", shown)
+        # When: 按完整說明
+        with unittest.mock.patch.object(daynote.webbrowser, "open", lambda url: opened.append(url)):
+            click(app.btn_help_more)
+        # Then: 開啟 README 的操作說明
+        self.assertEqual(opened, [daynote.USAGE_URL])
+        # When: 按 Esc
+        app.help_win.event_generate("<Escape>")
+        app.update()
+        # Then: 關閉
+        self.assertFalse(app.help_win.winfo_exists())
+
+    def test_f1_opens_help_once(self):
+        """按 F1 兩次 > 只開一個說明視窗"""
+        # Given: 已啟動
+        app = self.start()
+        # When: F1 兩次
+        app.open_help()
+        first = app.help_win
+        app.open_help()
+        # Then: 同一個視窗
+        self.assertIs(app.help_win, first)
+        self.assertTrue(first.winfo_exists())
+
     def test_logout(self):
         """「⋯」選單選登出並確認 > 撤銷授權、清空畫面、改顯示登入"""
         # Given: 已登入且有任務
