@@ -1758,6 +1758,7 @@ class _Popup:
         self.body.pack()
         self._render()
         self._place(anchor)
+        win_style_popup(self.win)  # 和主視窗一樣的系統圓角與暖色外框
         self.win.bind("<Escape>", lambda e: self.close())
         self.win.bind("<Button-1>", self._click_outside, add="+")
         self.win.focus_force()
@@ -1784,11 +1785,20 @@ class _Popup:
         if not (wx <= x < wx + self.win.winfo_width() and wy <= y < wy + self.win.winfo_height()):
             self.close()
 
-    def _link(self, parent, text, command, fg=None, font=SMALL):
-        fg = fg or ACCENT
-        lbl = tk.Label(parent, text=text, bg=CARD_BG, fg=fg, font=font, cursor="hand2", padx=px(4))
-        lbl.bind("<Button-1>", lambda e: command())
-        return lbl
+    def _chip(self, parent, text, command, style="soft"):
+        """選擇器裡的小膠囊按鈕（快捷日期、確定、不設時間等）。style 同 Pill：soft／primary／ghost／outline。"""
+        return Pill(parent, text, command, style=style, font=SMALL, padx=9, pady=2, bg=CARD_BG)
+
+    def _field(self, parent, chars):
+        """選擇器裡的圓角輸入框（寬 chars 個字），取得焦點時外框變成強調色。回傳 (外框, Entry)。"""
+        box = RoundedBox(parent, fill=BG, outline=BORDER, radius=12, padx=8, pady=3, bg=CARD_BG)
+        entry = tk.Entry(box.inner, width=chars, font=FONT, relief="flat", bg=BG, fg=TEXT,
+                         insertbackground=TEXT, highlightthickness=0)
+        entry.pack(fill="x")
+        box.config(width=entry.winfo_reqwidth() + px(16))
+        entry.bind("<FocusIn>", lambda e: box.set_outline(ACCENT), add="+")
+        entry.bind("<FocusOut>", lambda e: box.set_outline(BORDER), add="+")
+        return box, entry
 
     def pick(self, value):
         self.close()
@@ -1816,19 +1826,19 @@ class DatePicker(_Popup):
             w.destroy()
         today = dt.date.today()
         quick = tk.Frame(self.body, bg=CARD_BG)
-        quick.pack(fill="x", pady=(0, px(4)))
+        quick.pack(fill="x", pady=(0, px(6)))
         next_monday = today + dt.timedelta(days=7 - today.weekday())
         options = [("今天", today), ("明天", today + dt.timedelta(days=1)), ("下週一", next_monday)]
         for text, day in options:
-            self._link(quick, text, lambda d=day: self.pick(d)).pack(side="left")
+            self._chip(quick, text, lambda d=day: self.pick(d)).pack(side="left", padx=(0, px(4)))
         if self.allow_none:
-            self._link(quick, "無日期", lambda: self.pick(None), fg=GRAY).pack(side="left")
+            self._chip(quick, "無日期", lambda: self.pick(None), style="ghost").pack(side="left")
 
         head = tk.Frame(self.body, bg=CARD_BG)
         head.pack(fill="x")
         year, month = self.view
-        self._link(head, "◀", lambda: self._shift(-1), fg=GRAY, font=ICON_FONT).pack(side="left")
-        self._link(head, "▶", lambda: self._shift(1), fg=GRAY, font=ICON_FONT).pack(side="right")
+        self._chip(head, "◀", lambda: self._shift(-1), style="ghost").pack(side="left")
+        self._chip(head, "▶", lambda: self._shift(1), style="ghost").pack(side="right")
         tk.Label(head, text=f"{year} 年 {month} 月", bg=CARD_BG, fg=TEXT, font=FONT).pack(side="left", expand=True)
 
         grid = tk.Frame(self.body, bg=CARD_BG)
@@ -1836,16 +1846,18 @@ class DatePicker(_Popup):
         for col, name in enumerate(WEEK_HEAD):
             tk.Label(grid, text=name, bg=CARD_BG, fg=GRAY, font=SMALL, width=3).grid(row=0, column=col)
         weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(year, month)
+        size = px(26)  # 每格一張反鋸齒圓形圖：選中＝實心強調色、今天＝強調色細圈、其他＝透明（與底色同色）
         for row, week in enumerate(weeks, 1):
             for col, day in enumerate(week):
                 fg = TEXT if day.month == month else FADED_TEXT
-                bg = CARD_BG
                 if day == self.current:
-                    fg, bg = ON_ACCENT, ACCENT
+                    fg, image = ON_ACCENT, round_image(grid, size, ACCENT, CARD_BG)
                 elif day == today:
-                    fg = ACCENT
-                lbl = tk.Label(grid, text=str(day.day), bg=bg, fg=fg, font=SMALL, width=3,
-                               pady=px(2), cursor="hand2")
+                    fg, image = ACCENT, round_image(grid, size, CARD_BG, CARD_BG, outline=ACCENT, width=px(1))
+                else:
+                    image = round_image(grid, size, CARD_BG, CARD_BG)
+                lbl = tk.Label(grid, text=str(day.day), image=image, compound="center", bg=CARD_BG, fg=fg,
+                               font=SMALL, padx=px(2), pady=px(1), bd=0, cursor="hand2")
                 lbl.grid(row=row, column=col)
                 lbl.bind("<Button-1>", lambda e, d=day: self.pick(d))
 
@@ -1873,16 +1885,15 @@ class TimePicker(_Popup):
         row = tk.Frame(self.body, bg=CARD_BG)
         row.pack(fill="x", pady=(px(6), px(4)))
         tk.Label(row, text="時間", bg=CARD_BG, fg=GRAY, font=SMALL).pack(side="left")
-        self.custom = tk.Entry(row, width=6, font=FONT, relief="flat", bg=BG, fg=TEXT, insertbackground=TEXT,
-                               highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+        box, self.custom = self._field(row, 6)
         self.custom.insert(0, time_text(self.current) or "")
-        self.custom.pack(side="left", padx=px(6))
+        box.pack(side="left", padx=px(6))
         self.custom.bind("<Return>", lambda e: self._pick_custom())
-        self._link(row, "確定", self._pick_custom).pack(side="left")
+        self._chip(row, "確定", self._pick_custom, style="primary").pack(side="left")
         # 一打開就說明輸入方式；輸入錯誤時同一行改成紅字
         self.hint = tk.Label(self.body, text=self.HINT, bg=CARD_BG, fg=GRAY, font=SMALL, anchor="w")
         self.hint.pack(fill="x", pady=(0, px(6)))
-        self._link(self.body, "不設時間", lambda: self.pick(None), fg=GRAY).pack(anchor="w")
+        self._chip(self.body, "不設時間", lambda: self.pick(None), style="ghost").pack(anchor="w")
 
     HINT = "例如 11、15:30、下午3點，按 Enter 確定"
 
@@ -1915,25 +1926,24 @@ class RecurPicker(_Popup):
         for w in self.body.winfo_children():
             w.destroy()
         tk.Label(self.body, text="重複（依起始日期）", bg=CARD_BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
+        # 常用規則排成膠囊：目前的規則實心強調色，其他為細框
+        options = tk.Frame(self.body, bg=CARD_BG)
+        options.pack(fill="x", pady=(px(4), 0))
         for rule in self._options():
-            selected = rule == self.current
-            lbl = tk.Label(self.body, text=format_recur(rule), bg=ACCENT if selected else CARD_BG,
-                           fg=ON_ACCENT if selected else TEXT, font=FONT, cursor="hand2", anchor="w",
-                           padx=px(6), pady=px(2))
-            lbl.pack(fill="x", pady=px(1))
-            lbl.bind("<Button-1>", lambda e, r=rule: self.pick(r))
+            style = "primary" if rule == self.current else "outline"
+            Pill(options, format_recur(rule), lambda r=rule: self.pick(r), style=style, font=FONT,
+                 padx=12, pady=3, bg=CARD_BG).pack(anchor="w", pady=px(2))
         row = tk.Frame(self.body, bg=CARD_BG)
-        row.pack(fill="x", pady=(px(4), px(2)))
+        row.pack(fill="x", pady=(px(6), px(2)))
         tk.Label(row, text="自訂", bg=CARD_BG, fg=GRAY, font=SMALL).pack(side="left")
-        self.custom = tk.Entry(row, width=12, font=FONT, relief="flat", bg=BG, fg=TEXT, insertbackground=TEXT,
-                               highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+        box, self.custom = self._field(row, 12)
         self.custom.insert(0, format_recur(self.current) if self.current else "")
-        self.custom.pack(side="left", padx=px(6))
+        box.pack(side="left", padx=px(6))
         self.custom.bind("<Return>", lambda e: self._pick_custom())
-        self._link(row, "確定", self._pick_custom).pack(side="left")
+        self._chip(row, "確定", self._pick_custom, style="primary").pack(side="left")
         self.hint = tk.Label(self.body, text="", bg=CARD_BG, fg=RED, font=SMALL, anchor="w", justify="left")
         self.hint.pack(fill="x")
-        self._link(self.body, "不重複", lambda: self.pick(None), fg=GRAY).pack(anchor="w")
+        self._chip(self.body, "不重複", lambda: self.pick(None), style="ghost").pack(anchor="w")
 
     def _pick_custom(self):
         rule = parse_recur(self.custom.get())
@@ -3937,8 +3947,11 @@ class App(tk.Tk):
         keys = tk.Frame(body, bg=BG)
         keys.pack(fill="x")
         for row, (key, desc) in enumerate(HELP_SHORTCUTS):
-            tk.Label(keys, text=key, bg=CARD_BG, fg=TEXT, font=EVENT_TIME_FONT, padx=px(6), pady=px(1)).grid(
-                row=row, column=0, sticky="w", pady=px(2))
+            # 按鍵畫成圓角小標籤（不能點，只是外觀）
+            chip = Pill(keys, key, lambda: None, style="soft", font=EVENT_TIME_FONT, padx=8, pady=1)
+            chip.config(cursor="")
+            chip.unbind("<Button-1>")
+            chip.grid(row=row, column=0, sticky="w", pady=px(2))
             tk.Label(keys, text=desc, bg=BG, fg=TEXT, font=FONT, anchor="w").grid(
                 row=row, column=1, sticky="w", padx=(px(10), 0))
 

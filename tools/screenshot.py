@@ -8,6 +8,7 @@
 可截的畫面（--page）：
     main       主畫面（預設，週檢視）        month      主畫面展開整月
     daytip     滑鼠停在今天的日期上（月曆提示）  help       使用說明與快捷鍵（F1）
+    datepicker／timepicker／recurpicker  詳細頁的日期／提醒時間／重複選擇器
     detail     工作詳細資訊                  new        新增工作
     loggedout  尚未登入                      quick      快速列（Ctrl + Alt + D）
     quicktype  快速列輸入中（顯示辨識結果）  toast      右下角提醒
@@ -39,7 +40,7 @@ if "--theme" in sys.argv[:-1]:
     os.environ["DAYNOTE_THEME"] = sys.argv[sys.argv.index("--theme") + 1]
 from tests.test_app_gui import HOLIDAY_CAL, StoreGoogle, daynote, pump, settle  # noqa: E402
 
-PAGES = ("main", "month", "daytip", "help", "detail", "new", "loggedout", "quick", "quicktype", "toast")
+PAGES = ("main", "month", "daytip", "help", "datepicker", "timepicker", "recurpicker", "detail", "new", "loggedout", "quick", "quicktype", "toast")
 DEFAULT_OUT = os.path.join(ROOT, "docs", "images", "00-app.png")
 
 
@@ -123,6 +124,12 @@ def seed_sample(g, today):
     g.seed("買牛奶", today, list_id="L2")
 
 
+def _descendants(widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _descendants(child)
+
+
 def open_page(app, g, page, today):
     """切換到要截圖的畫面，回傳要截的視窗。"""
     if page == "month":
@@ -134,6 +141,20 @@ def open_page(app, g, page, today):
     elif page == "help":
         app.open_help()
         return app.help_win
+    elif page in ("datepicker", "timepicker", "recurpicker"):
+        task = next(t for t in app.tasks if t["title"] == "準備週會簡報")
+        app.open_detail(task)
+        pump(app, 0.2)
+        icon = {"datepicker": "📅", "timepicker": "⏰", "recurpicker": "🔁"}[page]
+        anchor = next(w for w in _descendants(app.detail_view)
+                      if isinstance(w, daynote.Pill) and w.text_value.startswith(icon))
+        if page == "datepicker":
+            picker = daynote.DatePicker(app, anchor, task["due"], lambda d: None)
+        elif page == "timepicker":
+            picker = daynote.TimePicker(app, anchor, task["time"], lambda t: None)
+        else:
+            picker = daynote.RecurPicker(app, anchor, None, task["due"], lambda r: None)
+        return picker.win
     elif page == "detail":
         app.open_detail(next(t for t in app.tasks if t["title"] == "準備週會簡報"))
     elif page == "new":
