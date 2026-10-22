@@ -1288,6 +1288,75 @@ class CalendarTest(AppTestCase):
         self.assertNotIn("⏰ 14:00 · 工作", shown)
         self.assertIn("工作", shown)
 
+    def test_right_click_menu_moves_to_tomorrow(self):
+        """待辦按右鍵選「移到明天」 > 從今天消失、Google 上的日期改成明天"""
+        # Given: 今天一筆任務
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        task = next(t for t in app.tasks if t["id"] == task_id)
+        label = find_label(app.list_frame, "寫週報")
+        # When: 右鍵選單選「移到明天」
+        self.assertTrue(label.bind("<Button-3>"))  # 列上有右鍵選單
+        app._build_task_menu(task).invoke("移到明天")
+        settle(app)
+        # Then: 今天沒有了、日期改成明天
+        tomorrow = self.today + dt.timedelta(days=1)
+        self.assertNotIn("寫週報", self.list_texts())
+        self.assertEqual(self.g.tasks[task_id]["due"], f"{tomorrow.isoformat()}T00:00:00.000Z")
+        self.assertEqual(self.status(), "已把「寫週報」移到明天")
+
+    def test_right_click_menu_disables_current_day(self):
+        """今天的待辦 > 右鍵選單的「移到今天」不能按"""
+        # Given: 今天一筆任務
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        # When: 建立右鍵選單
+        menu = app._build_task_menu(app.tasks[0])
+        # Then: 今天不能按、明天可以
+        self.assertEqual(menu.entrycget("移到今天", "state"), "disabled")
+        self.assertEqual(menu.entrycget("移到明天", "state"), "normal")
+
+    def test_move_to_no_date_clears_time_and_recur(self):
+        """有提醒與重複的待辦選「不排日期」 > 日期、⏰、🔁 一併清掉，詳細內文保留"""
+        # Given: 今天 15:00、每天重複
+        task_id = self.g.seed("量血壓", self.today, notes="⏰ 15:00\n🔁 每天\n記在本子上")
+        app = self.start()
+        task = next(t for t in app.tasks if t["id"] == task_id)
+        # When: 選「不排日期」
+        app._build_task_menu(task).invoke("不排日期")
+        settle(app)
+        # Then: 清掉日期與 metadata
+        self.assertIsNone(self.g.tasks[task_id]["due"])
+        self.assertEqual(self.g.tasks[task_id]["notes"], "記在本子上")
+
+    def test_move_all_overdue_to_today(self):
+        """逾期區按「全部移到今天」 > 所有逾期待辦改成今天，逾期區消失"""
+        # Given: 兩筆逾期
+        a = self.g.seed("回信", self.today - dt.timedelta(days=1))
+        b = self.g.seed("繳費", self.today - dt.timedelta(days=3))
+        app = self.start()
+        # When: 按「全部移到今天」
+        click(app.btn_overdue_today)
+        settle(app)
+        # Then: 都改成今天、逾期區不見
+        expected = f"{self.today.isoformat()}T00:00:00.000Z"
+        self.assertEqual((self.g.tasks[a]["due"], self.g.tasks[b]["due"]), (expected, expected))
+        self.assertFalse(any(t.startswith("▼ 逾期") for t in self.list_texts()))
+        self.assertEqual(self.status(), "已把 2 件移到今天")
+
+    def test_reschedule_failure_restores(self):
+        """改日期送出失敗 > 畫面還原、狀態列顯示錯誤"""
+        # Given: 今天一筆任務，Google 更新會失敗
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        self.g.fail.add("update_task")
+        # When: 移到明天
+        app._build_task_menu(app.tasks[0]).invoke("移到明天")
+        settle(app)
+        # Then: 仍在今天、紅字錯誤
+        self.assertIn("寫週報", self.list_texts())
+        self.assertEqual(self.status(), "update_task failed")
+
     def test_late_task_time_is_red(self):
         """今天時間已過還沒做的待辦 > 右側時間改紅色；還沒到的維持灰色"""
         if dt.datetime.now().time() < dt.time(0, 1) or dt.datetime.now().time() >= dt.time(23, 59):

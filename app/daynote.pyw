@@ -99,7 +99,7 @@ REMINDER_CHECK_MS = 30 * 1000    # 每 30 秒檢查一次提醒
 REMINDER_SNOOZE_MIN = 10
 REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
 NEXT_UP_TICK_MS = 60 * 1000      # 「下一件」摘要每分鐘更新
-FIRST_RUN_TIP = "小技巧：Ctrl + Alt + D 隨時快速新增，F8 顯示／隱藏"  # 第一次同步成功後在狀態列提示一次
+FIRST_RUN_TIP = "小技巧：在待辦上按右鍵可以改日期；Ctrl + Alt + D 隨時快速新增"  # 第一次同步成功後在狀態列提示一次
 FIRST_RUN_TIP_MS = 15 * 1000
 ADD_LIST_OPTION = "＋ 新增清單…"  # 清單下拉選單的最後一項
 SELECTED = "#f5e4d8"  # 月曆選中日期：粉彩蜜桃，和強調色同色系
@@ -2658,8 +2658,10 @@ class App(tk.Tk):
             overdue = sorted((t for t in top_level if t["due"] and t["due"] < day),
                              key=lambda t: (t["due"], self._order_key(t)))
             if overdue:
-                self._section_header(f"逾期（{len(overdue)}）", self.show_overdue,
-                                     self._toggle_overdue, fg=RED)
+                # 逾期的待辦多半是「今天要補做」：一鍵全部移到今天，不必逐筆打開改日期
+                self.btn_overdue_today = self._section_header(
+                    f"逾期（{len(overdue)}）", self.show_overdue, self._toggle_overdue, fg=RED,
+                    action=("全部移到今天", lambda: self.reschedule(overdue, self.today)))
                 if self.show_overdue:
                     for task in overdue:
                         self._task_with_children(task)
@@ -2741,10 +2743,12 @@ class App(tk.Tk):
         tk.Label(box, text="登入後才能讀取與新增工作", bg=BG, fg=GRAY, font=SMALL).pack(pady=(px(4), px(12)))
         Pill(box, "登入 Google", self.login, style="primary", padx=20).pack()
 
-    def _section_header(self, text, expanded, toggle, fg=ACCENT):
+    def _section_header(self, text, expanded, toggle, fg=ACCENT, action=None):
         """可收合區塊的標題列（逾期、未排日期）：左邊標題＋淡色數量，右邊收合箭頭，整列可點。
 
         text 形如「逾期（1）」；標題 Label 的 text_value 保留「▼ 逾期（1）」，供測試辨識。
+        action＝(文字, 函式)：收合箭頭左邊的動作連結（例如「全部移到今天」），點它不會收合區塊。
+        @return 動作連結的 Label；沒有 action 時回傳 None
         """
         full = f"{'▼' if expanded else '▶'} {text}"
         name, _, count = text.rstrip("）").partition("（")
@@ -2767,6 +2771,15 @@ class App(tk.Tk):
             title.config(text=full)
         for widget in parts:
             widget.bind("<Button-1>", lambda e: toggle())
+        if action:
+            label, command = action
+            link = tk.Label(header, text=label, bg=BG, fg=ACCENT, font=SMALL, cursor="hand2")
+            link.pack(side="right", padx=(0, px(8)))
+            link.bind("<Button-1>", lambda e: command())
+            link.bind("<Enter>", lambda e: link.config(fg=ACCENT_HOVER))
+            link.bind("<Leave>", lambda e: link.config(fg=ACCENT))
+            return link
+        return None
 
     # ---- 任務階層（比照 Google Tasks：子任務縮排在父任務下方）
 
@@ -2829,9 +2842,10 @@ class App(tk.Tk):
         if subtitle:
             tk.Label(text, text=subtitle, bg=BG, fg=subtitle_fg, font=SMALL, anchor="w").pack(fill="x")
         window = row.create_window(px(4), px(6), window=inner, anchor="nw")
-        if task:  # 點整列（圓圈以外）開啟詳細頁
+        if task:  # 點整列（圓圈以外）開啟詳細頁；按右鍵開快速選單（改日期、完成）
             for widget in (row, inner, text, *text.winfo_children(), *([lbl_at] if lbl_at else [])):
                 widget.bind("<Button-1>", lambda e: self.open_detail(task))
+                widget.bind("<Button-3>", lambda e: self._popup_task_menu(task, e))
                 widget.config(cursor="hand2")
         # 滑鼠移過整列時淡淡變色，提示可以點
         row.bind("<Enter>", lambda e: _set_bg(row, HOVER))
@@ -3695,6 +3709,65 @@ class App(tk.Tk):
             if self.status.cget("text") == FIRST_RUN_TIP:  # 期間沒有其他訊息蓋過才換回
                 self._set_status(self.synced_text)
         self.after(FIRST_RUN_TIP_MS, restore)
+
+    def _build_task_menu(self, task):
+        """待辦的右鍵選單：改日期（今天／明天／不排日期）、完成、開啟詳細資訊。子工作跟著父任務，不提供改日期。"""
+        menu = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
+                       activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        if not self._is_child(task):
+            today = self.today
+            for label, day in (("移到今天", today), ("移到明天", today + dt.timedelta(days=1)), ("不排日期", None)):
+                menu.add_command(label=label, command=lambda d=day: self.reschedule([task], d),
+                                 state="disabled" if task["due"] == day else "normal")
+            menu.add_separator()
+        menu.add_command(label="✓ 完成", command=lambda: self.complete(task))
+        menu.add_command(label="開啟詳細資訊", command=lambda: self.open_detail(task))
+        return menu
+
+    def _popup_task_menu(self, task, event):
+        self.task_menu = self._build_task_menu(task)
+        self.task_menu.tk_popup(event.x_root, event.y_root)
+
+    def _is_child(self, task):
+        ids = {t["id"] for t in self.tasks}
+        return bool(task.get("parent")) and task["parent"] in ids
+
+    def reschedule(self, tasks, day):
+        """把待辦移到 day（None＝不排日期）：先更新畫面，背景送出；失敗就還原並顯示錯誤。
+
+        不排日期時一併清掉提醒時間與重複規則（沒有日期就不能提醒，也不能重複）。
+        """
+        changes = []
+        for task in tasks:
+            if task not in self.tasks or task["due"] == day:
+                continue
+            fields = {"due": f"{day.isoformat()}T00:00:00.000Z" if day else None}
+            if day is None and (task.get("time") or task.get("recur")):
+                fields["notes"] = join_meta(None, None, task.get("notes", ""))
+            changes.append((task, dict(task), fields))
+        if not changes:
+            return
+        for task, _, fields in changes:
+            apply_fields(task, fields)
+        self.redraw()
+        where = date_text(day)
+        done_text = (f"已把「{changes[0][0]['title']}」移到{where}" if len(changes) == 1
+                     else f"已把 {len(changes)} 件移到{where}")
+        self._set_status("儲存中…")
+
+        def work():
+            for task, _, fields in changes:
+                self.g.update_task(task["list_id"], task["id"], fields)
+
+        def done(_, err):
+            if err:
+                for task, before, _ in changes:
+                    task.update(before)  # 還原畫面，下次同步以 Google 上的資料為準
+                self.redraw()
+                self._show_error(err)
+            else:
+                self._set_status(done_text)
+        self.run_bg(work, done)
 
     def complete(self, task):
         """標記完成；比照 Google Tasks App，完成父任務時子任務一併完成。
