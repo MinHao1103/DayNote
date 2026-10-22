@@ -345,6 +345,23 @@ class DaySummaryTest(unittest.TestCase):
                 self.assertEqual(result, expected)
 
 
+class SnoozeOptionsTest(unittest.TestCase):
+    """提醒延後選項（snooze_options）。"""
+
+    def test_options(self):
+        """現在 14:00 > 10 分鐘、30 分鐘、1 小時、明天 9:00"""
+        # Given: 現在 14:00
+        # When: 產生選項
+        result = daynote.snooze_options(NOW)
+        # Then: 說明與時間正確
+        self.assertEqual(result, [
+            ("10 分鐘後", NOW + dt.timedelta(minutes=10)),
+            ("30 分鐘後", NOW + dt.timedelta(minutes=30)),
+            ("1 小時後", NOW + dt.timedelta(hours=1)),
+            ("明天 9:00", dt.datetime.combine(TODAY + dt.timedelta(days=1), T(9, 0))),
+        ])
+
+
 class NextUpTest(unittest.TestCase):
     """大標題下方的「下一件」摘要（next_up_text）。"""
 

@@ -1603,6 +1603,20 @@ class ReminderTest(AppTestCase):
         self.assertIn(f"task={task_id}", logs.output[0])
         self.assertIn("scheduled=", logs.output[0])
 
+    def test_reminder_snooze_until_tomorrow(self):
+        """提醒視窗的 ▾ 選「明天 9:00再提醒」 > 延後到明天 9:00 並記錄"""
+        # Given: 跳出的提醒
+        self.seed_due_now()
+        app = self.start()
+        app._check_reminders()
+        # When: 選明天早上
+        self.toast().snooze_menu.invoke("明天 9:00再提醒")
+        # Then: 延後到明天 9:00
+        tomorrow_9 = dt.datetime.combine(self.today + dt.timedelta(days=1), dt.time(9, 0))
+        self.assertEqual(list(app.snoozed.values()), [tomorrow_9])
+        self.assertEqual(daynote.ReminderToast.active, [])
+        self.assertEqual(self.status(), "明天 9:00再提醒")
+
     def test_reminder_done(self):
         """提醒視窗按「✓ 完成」 > 任務完成"""
         # Given: 跳出的提醒

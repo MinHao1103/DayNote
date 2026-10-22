@@ -97,6 +97,8 @@ EVENT_TIME_FONT = (UI_FONT, 9, "bold")
 UNDO_SECONDS = 5
 REMINDER_CHECK_MS = 30 * 1000    # 每 30 秒檢查一次提醒
 REMINDER_SNOOZE_MIN = 10
+REMINDER_SNOOZE_MORE_MIN = (30, 60)    # 延後下拉選單的其他選項（分鐘）
+REMINDER_TOMORROW_AT = dt.time(9, 0)   # 延後下拉選單「明天早上」的時間
 REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
 NEXT_UP_TICK_MS = 60 * 1000      # 「下一件」摘要每分鐘更新
 FIRST_RUN_TIP = "小技巧：在待辦上按右鍵可以改日期；Ctrl + Alt + D 隨時快速新增"  # 第一次同步成功後在狀態列提示一次
@@ -1092,6 +1094,21 @@ def is_late(task, now):
     return task["due"] == now.date() and at is not None and at < now.time().replace(second=0, microsecond=0)
 
 
+def snooze_options(now):
+    """提醒延後的選項 [(說明, 再提醒的時間)]：第一個是按鈕上的預設值，其餘放在下拉選單。
+
+    @param now 目前時間（dt.datetime）
+    @return 例如 [("10 分鐘後", …), ("30 分鐘後", …), ("1 小時後", …), ("明天 9:00", …)]
+    """
+    def minutes_text(m):
+        return f"{m // 60} 小時後" if m % 60 == 0 else f"{m} 分鐘後"
+    options = [(minutes_text(m), now + dt.timedelta(minutes=m))
+               for m in (REMINDER_SNOOZE_MIN, *REMINDER_SNOOZE_MORE_MIN)]
+    tomorrow = dt.datetime.combine(now.date() + dt.timedelta(days=1), REMINDER_TOMORROW_AT)
+    options.append((f"明天 {REMINDER_TOMORROW_AT.hour}:{REMINDER_TOMORROW_AT:%M}", tomorrow))
+    return options
+
+
 def next_up_text(items, now):
     """大標題下方的摘要：今天還沒到的第一件（行程或有時間的待辦）；沒有就回傳空字串。
 
@@ -1852,11 +1869,21 @@ class ReminderToast:
         buttons = tk.Frame(body, bg=BG)
         buttons.pack(fill="x")
         # 膠囊按鈕和主視窗一致；延後按鈕寫明「再提醒」，第一次看到的人不用猜
+        # 最常用的 10 分鐘一鍵完成，其他時間（30 分鐘、1 小時、明天早上）放在旁邊的 ▾ 選單，比照 Windows 通知
         done = Pill(buttons, "✓ 完成", lambda: (self.close(), on_done()), style="primary", padx=12, pady=3)
         done.pack(side="right")
-        snooze = Pill(buttons, f"{REMINDER_SNOOZE_MIN} 分鐘後再提醒", lambda: (self.close(), on_snooze()),
-                      style="outline", padx=12, pady=3)
-        snooze.pack(side="right", padx=(0, px(8)))
+        self.on_snooze = on_snooze
+        default = snooze_options(dt.datetime.now())[0][0]
+        more = Pill(buttons, "▾", self._open_snooze_menu, style="outline", padx=8, pady=3)
+        more.pack(side="right", padx=(0, px(8)))
+        Tooltip(more, "其他延後時間")
+        self.btn_more_snooze = more
+        snooze = Pill(buttons, f"{default}再提醒", lambda: self.snooze(0), style="outline", padx=12, pady=3)
+        snooze.pack(side="right", padx=(0, px(4)))
+        self.snooze_menu = tk.Menu(win, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
+                                   activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        for index, (label, _) in enumerate(snooze_options(dt.datetime.now())[1:], start=1):
+            self.snooze_menu.add_command(label=f"{label}再提醒", command=lambda i=index: self.snooze(i))
 
         ReminderToast.active.append(self)
         ReminderToast.relayout()
@@ -1865,6 +1892,16 @@ class ReminderToast:
             winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
         except RuntimeError:
             pass  # 沒有音效裝置時靜音
+
+    def snooze(self, index):
+        """依 snooze_options 的第 index 個選項延後；時間在按下當下才計算。"""
+        label, fire_at = snooze_options(dt.datetime.now())[index]
+        self.close()
+        self.on_snooze(label, fire_at)
+
+    def _open_snooze_menu(self):
+        self.snooze_menu.tk_popup(self.btn_more_snooze.winfo_rootx(),
+                                  self.btn_more_snooze.winfo_rooty() + self.btn_more_snooze.winfo_height())
 
     @classmethod
     def relayout(cls):
@@ -3603,16 +3640,17 @@ class App(tk.Tk):
                      now.isoformat(timespec="seconds"))
             ReminderToast(self, task, when,
                           on_done=lambda t=task: self.complete(t),
-                          on_snooze=lambda k=key: self._snooze(k))
+                          on_snooze=lambda label, fire_at, k=key: self._snooze(k, label, fire_at))
         if changed:
             self._save_reminder_state()
         self.after(REMINDER_CHECK_MS, self._check_reminders)
 
-    def _snooze(self, key):
+    def _snooze(self, key, label, fire_at):
+        """延後提醒到 fire_at；記在 state.json，重開 DayNote 也會照時間再提醒。"""
         self.reminded.discard(key)
-        self.snoozed[key] = dt.datetime.now() + dt.timedelta(minutes=REMINDER_SNOOZE_MIN)
+        self.snoozed[key] = fire_at
         self._save_reminder_state()
-        self._set_status(f"{REMINDER_SNOOZE_MIN} 分鐘後再提醒")
+        self._set_status(f"{label}再提醒")
 
     def _save_reminder_state(self):
         """已提醒記錄寫進 daynote_state.json，重開不會重複提醒；只保留最近 300 筆。"""
