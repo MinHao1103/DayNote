@@ -1558,19 +1558,57 @@ class Tooltip:
         tip.attributes("-topmost", True)  # 主視窗置頂時，提示也要在最上層
         tk.Label(tip, text=text, bg=TEXT, fg=ON_ACCENT, font=SMALL, padx=px(6), pady=px(2)).pack()
         tip.update_idletasks()
-        x = self.widget.winfo_rootx() + (self.widget.winfo_width() - tip.winfo_reqwidth()) // 2
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + px(4)
+        x, y = self._position(tip)
         screen = win_virtual_screen()
         if screen:  # 靠近螢幕右緣（例如 ✕ 按鈕）時往內縮，避免提示被切掉
             x = min(max(x, screen[0]), screen[2] - tip.winfo_reqwidth())
         tip.geometry(f"+{x}+{y}")
         self.tip = tip
 
+    def _position(self, tip):
+        """提示的左上角（螢幕座標）：元件正下方置中。"""
+        x = self.widget.winfo_rootx() + (self.widget.winfo_width() - tip.winfo_reqwidth()) // 2
+        return x, self.widget.winfo_rooty() + self.widget.winfo_height() + px(4)
+
     def _hide(self, _=None):
         self._cancel()
         if self.tip:
             self.tip.destroy()
             self.tip = None
+
+
+class CellTooltip(Tooltip):
+    """Canvas 上各格子各自的提示（例如月曆日期）：滑鼠移到另一格就重新計時，顯示在該格正下方。
+
+    cell_at(x, y) 回傳格子（None＝不在格子上）；text_of(格子) 回傳說明（空字串＝這格不顯示）；
+    rect_of(格子) 回傳格子在 Canvas 內的 (左, 上, 右, 下)。
+    """
+
+    def __init__(self, widget, cell_at, text_of, rect_of):
+        super().__init__(widget, lambda: text_of(self.cell))
+        self.cell_at, self.text_of, self.rect_of = cell_at, text_of, rect_of
+        self.cell = None
+        widget.unbind("<Enter>")  # 改由 <Motion> 依格子觸發
+        widget.bind("<Motion>", self._on_motion, add="+")
+
+    def _on_motion(self, event):
+        cell = self.cell_at(event.x, event.y)
+        if cell == self.cell and (self.tip or self.job):
+            return
+        self._hide()
+        self.cell = cell
+        if cell is not None and self.text_of(cell):
+            self._schedule()
+
+    def _hide(self, _=None):
+        super()._hide()
+        if _ is not None:  # 滑鼠離開或按下：下次移動要重新計時
+            self.cell = None
+
+    def _position(self, tip):
+        left, _, right, bottom = self.rect_of(self.cell)
+        x = self.widget.winfo_rootx() + round((left + right) / 2) - tip.winfo_reqwidth() // 2
+        return x, self.widget.winfo_rooty() + round(bottom) + px(2)
 
 
 class _Popup:
@@ -2120,6 +2158,27 @@ def ask_text(parent, title, prompt, ok_text="建立"):
     return result["value"]
 
 
+def day_summary(day, today, task_count, preview_count, event_count, holidays):
+    """月曆日期提示的文字：節日、待辦（過去的日子稱逾期）、重複預定、行程；什麼都沒有回傳空字串。
+
+    @param day 日期
+    @param today 今天
+    @param task_count 當天未完成的待辦數（只算最上層，子工作跟著父任務）
+    @param preview_count 重複待辦預定的件數
+    @param event_count 日曆行程數
+    @param holidays [(名稱, 是否放假)]
+    @return 例如「國慶日（放假） · 2 件待辦 · 1 個行程」
+    """
+    parts = [name + ("（放假）" if off else "") for name, off in holidays if name]
+    if task_count:
+        parts.append(f"{task_count} 件{'逾期' if day < today else '待辦'}")
+    if preview_count:
+        parts.append(f"{preview_count} 件重複待辦預定")
+    if event_count:
+        parts.append(f"{event_count} 個行程")
+    return " · ".join(parts)
+
+
 def due_field(day):
     """Tasks API 的 due 欄位值：只有日期有意義，固定送當天 00:00 UTC；None 表示不排日期。"""
     return f"{day.isoformat()}T00:00:00.000Z" if day else None
@@ -2500,6 +2559,8 @@ class App(tk.Tk):
                              bg=BG, highlightthickness=0)
         self.cal.pack(pady=px(4))
         self.cal.bind("<Button-1>", self._on_cal_click)
+        # 滑鼠停在日期上說明當天有什麼，第一次用的人不必猜圓點顏色的意思
+        self.cal_tooltip = CellTooltip(self.cal, self._cal_cell_at, self._day_tip_text, self._cal_cell_rect)
 
         # 底部先 pack，視窗縮小時才不會被任務清單擠掉
         status_row = tk.Frame(self, bg=BG)
@@ -3439,6 +3500,28 @@ class App(tk.Tk):
         self.view = (index // 12, index % 12 + 1)
         self.refresh()
         self.redraw()
+
+    def _cal_cell_at(self, x, y):
+        """Canvas 座標所在的日期；不在日期格上回傳 None。"""
+        row, col = (y - HEAD_H) // CELL_H, x // CELL_W
+        if y >= HEAD_H and 0 <= row < len(self.weeks) and 0 <= col < 7:
+            return self.weeks[row][col]
+        return None
+
+    def _cal_cell_rect(self, day):
+        for row, week in enumerate(self.weeks):
+            if day in week:
+                col = week.index(day)
+                return col * CELL_W, HEAD_H + row * CELL_H, (col + 1) * CELL_W, HEAD_H + (row + 1) * CELL_H
+        return 0, 0, CELL_W, CELL_H
+
+    def _day_tip_text(self, day):
+        if day is None:
+            return ""
+        tasks = sum(1 for t in self._top_level() if t["due"] == day)
+        previews = len(self._previews(day, day).get(day, []))
+        return day_summary(day, self.today, tasks, previews, len(self.events.get(day, [])),
+                           self.holidays.get(day, []))
 
     def _on_cal_click(self, event):
         row, col = (event.y - HEAD_H) // CELL_H, event.x // CELL_W

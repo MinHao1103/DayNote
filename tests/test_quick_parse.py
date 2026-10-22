@@ -322,6 +322,29 @@ class IsLateTest(unittest.TestCase):
                 self.assertEqual(result, expected)
 
 
+class DaySummaryTest(unittest.TestCase):
+    """月曆日期提示（day_summary）。"""
+
+    def test_cases(self):
+        """依當天內容組出說明；過去的待辦稱逾期；什麼都沒有回傳空字串"""
+        yesterday = TODAY - dt.timedelta(days=1)
+        cases = [
+            ("什麼都沒有", (TODAY, 0, 0, 0, []), ""),
+            ("待辦與行程", (TODAY, 2, 0, 1, []), "2 件待辦 · 1 個行程"),
+            ("過去的日子", (yesterday, 1, 0, 0, []), "1 件逾期"),
+            ("重複預定", (TODAY, 0, 1, 0, []), "1 件重複待辦預定"),
+            ("放假節日在最前面", (TODAY, 1, 0, 0, [("國慶日", True)]), "國慶日（放假） · 1 件待辦"),
+            ("一般節日", (TODAY, 0, 0, 0, [("萬聖節", False)]), "萬聖節"),
+        ]
+        for name, (day, tasks, previews, events, holidays), expected in cases:
+            with self.subTest(name=name):
+                # Given: 當天的內容
+                # When: 產生說明
+                result = daynote.day_summary(day, TODAY, tasks, previews, events, holidays)
+                # Then: 文字正確
+                self.assertEqual(result, expected)
+
+
 class NextUpTest(unittest.TestCase):
     """大標題下方的「下一件」摘要（next_up_text）。"""
 

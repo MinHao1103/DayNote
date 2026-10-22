@@ -1200,6 +1200,31 @@ class CalendarTest(AppTestCase):
         self.assertGreaterEqual(len(app.weeks), 4)
         self.assertFalse(app.state_data["compact_calendar"])
 
+    def test_calendar_day_tooltip(self):
+        """滑鼠停在有待辦與行程的日期上 > 顯示當天摘要；移到沒有安排的日期 > 不顯示"""
+        # Given: 今天兩筆待辦、一個行程
+        day = self.today.isoformat()
+        self.g.events_by_cal["primary"].append(
+            {"summary": "週會", "start": {"dateTime": f"{day}T15:00:00"}, "end": {"dateTime": f"{day}T16:00:00"}})
+        self.g.seed("寫週報", self.today)
+        self.g.seed("回信", self.today)
+        app = self.start()
+        row = next(i for i, week in enumerate(app.weeks) if self.today in week)
+        col = app.weeks[row].index(self.today)
+        x, y = col * daynote.CELL_W + daynote.CELL_W // 2, daynote.HEAD_H + row * daynote.CELL_H + 5
+        # When: 滑鼠移到今天並停留
+        app.cal.event_generate("<Motion>", x=x, y=y)
+        pump(app, 0.7)
+        # Then: 顯示摘要
+        tip = app.cal_tooltip.tip
+        self.assertIsNotNone(tip)
+        self.assertEqual(texts(tip), ["2 件待辦 · 1 個行程"])
+        # When: 移到標題列（不在日期格上）
+        app.cal.event_generate("<Motion>", x=x, y=2)
+        pump(app, 0.7)
+        # Then: 收起
+        self.assertIsNone(app.cal_tooltip.tip)
+
     def test_keyboard_navigation(self):
         """方向鍵與 Home > 前後一天、前後一週、回到今天"""
         # Given: 月曆取得焦點
