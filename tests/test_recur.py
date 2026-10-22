@@ -1211,6 +1211,54 @@ def weekly_report(**overrides):
     return make_task(**{"title": "交週報", "due": D(2026, 10, 12), "recur": parse("每週一"), **overrides})
 
 
+class ThemeTest(unittest.TestCase):
+    """風格（THEMES）資料：每種都有完整的顏色，文字在底色上的對比 ≥ 4.5:1（WCAG AA）。"""
+
+    @staticmethod
+    def contrast(a, b):
+        def lum(h):
+            r, g, b_ = (int(h[i:i + 2], 16) / 255 for i in (1, 3, 5))
+            f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4  # noqa: E731
+            return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b_)
+        hi, lo = sorted((lum(a), lum(b)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    def test_same_keys(self):
+        """每種風格 > 顏色欄位和預設風格完全相同"""
+        # Given: 預設風格的欄位
+        expected = set(daynote.THEMES[daynote.DEFAULT_THEME]["colors"])
+        for key, theme in daynote.THEMES.items():
+            with self.subTest(theme=key):
+                # When: 取出該風格的欄位
+                result = set(theme["colors"])
+                # Then: 一致
+                self.assertEqual(result, expected)
+
+    def test_text_contrast(self):
+        """每種風格 > 文字色在 BG、CARD_BG 上、強調色底上的白字，對比皆 ≥ 4.5"""
+        for key, theme in daynote.THEMES.items():
+            c = theme["colors"]
+            pairs = [(fg, bg) for fg in ("TEXT", "GRAY", "ACCENT", "RED", "HOLIDAY_RED") for bg in ("BG", "CARD_BG")]
+            pairs.append(("ON_ACCENT", "ACCENT"))
+            for fg, bg in pairs:
+                with self.subTest(theme=key, fg=fg, bg=bg):
+                    # Given: 風格的前景與背景
+                    # When: 計算對比
+                    ratio = self.contrast(c[fg], c[bg])
+                    # Then: ≥ 4.5
+                    self.assertGreaterEqual(round(ratio, 2), 4.5)
+
+    def test_default_matches_module_colors(self):
+        """預設風格 > 和模組目前的顏色常數一致（測試以預設風格執行）"""
+        for name, value in daynote.THEMES[daynote.DEFAULT_THEME]["colors"].items():
+            with self.subTest(name=name):
+                # Given: 預設風格的顏色
+                # When: 讀取模組常數
+                result = getattr(daynote, name)
+                # Then: 相同
+                self.assertEqual(result, value)
+
+
 class CanSkipTest(unittest.TestCase):
 
     def test_visibility(self):

@@ -451,6 +451,24 @@ class StartupTest(AppTestCase):
         # Then: 關閉
         self.assertFalse(app.help_win.winfo_exists())
 
+    def test_theme_menu_saves_and_restarts(self):
+        """「⋯」→「風格」選墨夜 > 記住風格並重新啟動；選目前的風格 > 什麼都不做"""
+        # Given: 已啟動（預設奶油陶土），重新啟動換成記錄
+        app = self.start()
+        restarted = []
+        app.restart = lambda: restarted.append(True)
+        # When: 選目前的風格
+        app.menu_theme.invoke("奶油陶土")
+        # Then: 不重新啟動
+        self.assertEqual(restarted, [])
+        # When: 選墨夜
+        app.menu_theme.invoke("墨夜（深色）")
+        # Then: 已存檔並重新啟動
+        with open(os.path.join(self.tmp, "state.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["theme"], "night")
+        self.assertEqual(restarted, [True])
+        self.assertEqual(self.status(), "正在換成「墨夜（深色）」…")
+
     def test_f1_opens_help_once(self):
         """按 F1 兩次 > 只開一個說明視窗"""
         # Given: 已啟動

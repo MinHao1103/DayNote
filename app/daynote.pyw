@@ -24,6 +24,7 @@ import queue
 import re
 import secrets
 import ssl
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -103,6 +104,7 @@ REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
 NEXT_UP_TICK_MS = 60 * 1000      # 「下一件」摘要每分鐘更新
 FIRST_RUN_TIP = "小技巧：在待辦上按右鍵可以改日期；Ctrl + Alt + D 隨時快速新增"  # 第一次同步成功後在狀態列提示一次
 FIRST_RUN_TIP_MS = 15 * 1000
+RESTART_CLOSE_MS = 1500  # 換風格重新啟動時，舊視窗最晚在新的一份啟動後這麼久關閉
 USAGE_URL = "https://github.com/MinHao1103/DayNote#怎麼用"  # README 的完整操作說明
 # 使用說明視窗的內容：(按鍵, 功能)；全域快捷鍵（F8、Ctrl + Alt + D）在其他程式裡也有效
 HELP_SHORTCUTS = (
@@ -122,21 +124,80 @@ HELP_TIPS = (
     "在待辦上按右鍵：移到今天、明天或不排日期",
     "滑鼠停在月曆日期上，看當天有幾件待辦、幾個行程",
     "按月份旁的「展開整月」看整個月",
+    "右上角「⋯」→「風格」可以換配色（例如深色）",
 )
 ADD_LIST_OPTION = "＋ 新增清單…"  # 清單下拉選單的最後一項
 SELECTED = "#f5e4d8"  # 月曆選中日期：粉彩蜜桃，和強調色同色系
 DIVIDER = "#efe7da"   # 清單列之間的細分隔線
 HOVER = "#f4ece0"
 CARD = "#ffffff"
-ACCENT = "#9c5c45"        # 陶土色：白字對比 5.2:1、奶油底上當文字 4.9:1
+ACCENT = "#985a43"        # 陶土色：白字對比 5.4:1、奶油底上當文字 5.1:1、米色欄位 4.7:1
 ACCENT_HOVER = "#854c38"
 ACCENT_SOFT = "#f3e2d6"   # 次要按鈕、選項膠囊的粉彩蜜桃底
 ACCENT_SOFT_HOVER = "#ecd4c4"
 RED = "#b44745"           # 柔和的玫瑰紅：逾期、錯誤
-HOLIDAY_RED = "#ad525a"   # 週末與國定假日的日期數字
+HOLIDAY_RED = "#a44c54"   # 週末與國定假日的日期數字
 HOLIDAY_RED_FADED = "#e4c0c0"  # 其他月份的週末／假日
 FESTIVAL = "#e2b766"      # 粉彩赭黃：一般節日（不放假）的角標
 GRAY = "#72665a"     # 暖灰：在奶油底對比 5.0:1、米色欄位 4.6:1
+# ---- 風格（配色＋標題字型）：「⋯」→「風格」選擇，存在 state.json 的 theme，重新啟動後套用
+# 每種風格的文字用色（TEXT、GRAY、ACCENT、RED、HOLIDAY_RED）在 BG 與 CARD_BG 上對比皆 ≥ 4.5:1（有單元測試檢查）
+# fonts：title／heading＝標題字級；serif＝標題用思源宋體（沒安裝時維持正黑體）
+THEMES = {
+    "cream": {"name": "奶油陶土", "fonts": {"serif": True, "title": 16, "heading": 11}, "colors": {
+        "BG": "#fbf7f0", "BORDER": "#e6dccc", "TEXT": "#3d342c", "EVENT_DOT": "#a9bfa2", "PREVIEW_DOT": "#e0bca8",
+        "CARD_BG": "#f4ede2", "FADED_TEXT": "#cdc2b3", "ON_ACCENT": "#ffffff", "SELECTED": "#f5e4d8",
+        "DIVIDER": "#efe7da", "HOVER": "#f4ece0", "CARD": "#ffffff", "ACCENT": "#985a43",
+        "ACCENT_HOVER": "#854c38", "ACCENT_SOFT": "#f3e2d6", "ACCENT_SOFT_HOVER": "#ecd4c4", "RED": "#b44745",
+        "HOLIDAY_RED": "#a44c54", "HOLIDAY_RED_FADED": "#e4c0c0", "FESTIVAL": "#e2b766", "GRAY": "#72665a"}},
+    "editorial": {"name": "編輯手帳", "fonts": {"serif": True, "title": 24, "heading": 12}, "colors": {
+        "BG": "#f7f3ea", "BORDER": "#ddd3c2", "TEXT": "#1f1b16", "EVENT_DOT": "#7f9c8a", "PREVIEW_DOT": "#e2b3a6",
+        "CARD_BG": "#efe8db", "FADED_TEXT": "#cbc1b1", "ON_ACCENT": "#ffffff", "SELECTED": "#f3dcd2",
+        "DIVIDER": "#e8e0d1", "HOVER": "#f1ebdf", "CARD": "#ffffff", "ACCENT": "#b8402a",
+        "ACCENT_HOVER": "#9a3421", "ACCENT_SOFT": "#f3dcd2", "ACCENT_SOFT_HOVER": "#ecccbf", "RED": "#b8402a",
+        "HOLIDAY_RED": "#b8402a", "HOLIDAY_RED_FADED": "#e6c2b8", "FESTIVAL": "#d9a441", "GRAY": "#6b6257"}},
+    "night": {"name": "墨夜（深色）", "fonts": {"serif": True, "title": 22, "heading": 12}, "colors": {
+        "BG": "#17191e", "BORDER": "#2f323a", "TEXT": "#ece6da", "EVENT_DOT": "#7fa88f", "PREVIEW_DOT": "#7a5d3a",
+        "CARD_BG": "#22252c", "FADED_TEXT": "#55585f", "ON_ACCENT": "#17191e", "SELECTED": "#3a3122",
+        "DIVIDER": "#24272e", "HOVER": "#20232a", "CARD": "#22252c", "ACCENT": "#e8a33d",
+        "ACCENT_HOVER": "#f0b55a", "ACCENT_SOFT": "#3a3122", "ACCENT_SOFT_HOVER": "#4a3d29", "RED": "#ef7a6b",
+        "HOLIDAY_RED": "#e58a7e", "HOLIDAY_RED_FADED": "#6b4a47", "FESTIVAL": "#e8a33d", "GRAY": "#9c968b"}},
+    "nordic": {"name": "北歐極簡", "fonts": {"serif": False, "title": 22, "heading": 12}, "colors": {
+        "BG": "#f3f4f1", "BORDER": "#d9ddd6", "TEXT": "#1c2420", "EVENT_DOT": "#8fb3a0", "PREVIEW_DOT": "#b9d0c1",
+        "CARD_BG": "#e9ece6", "FADED_TEXT": "#c2c8c2", "ON_ACCENT": "#ffffff", "SELECTED": "#d8e6dc",
+        "DIVIDER": "#e2e5df", "HOVER": "#eaede7", "CARD": "#ffffff", "ACCENT": "#2f6b4f",
+        "ACCENT_HOVER": "#24563f", "ACCENT_SOFT": "#d8e6dc", "ACCENT_SOFT_HOVER": "#c7dbcd", "RED": "#ae4337",
+        "HOLIDAY_RED": "#ae4337", "HOLIDAY_RED_FADED": "#e2c3bd", "FESTIVAL": "#d9a441", "GRAY": "#5f6862"}},
+}
+DEFAULT_THEME = "cream"
+CURRENT_THEME = DEFAULT_THEME
+THEME_FONTS = THEMES[DEFAULT_THEME]["fonts"]
+
+
+def apply_theme(key):
+    """把風格的配色寫進模組常數；必須在建立任何元件（以及 Pill 等類別定義）之前呼叫。不認得的風格用預設。"""
+    global CURRENT_THEME, THEME_FONTS
+    theme = THEMES.get(key) or THEMES[DEFAULT_THEME]
+    CURRENT_THEME = key if key in THEMES else DEFAULT_THEME
+    THEME_FONTS = theme["fonts"]
+    globals().update(theme["colors"])
+
+
+def saved_theme():
+    """state.json 記錄的風格；環境變數 DAYNOTE_THEME（截圖工具用）優先。讀不到時用預設。"""
+    if os.environ.get("DAYNOTE_THEME"):
+        return os.environ["DAYNOTE_THEME"]
+    try:
+        with open(STATE_PATH, encoding="utf-8") as f:
+            return json.load(f).get("theme", DEFAULT_THEME)
+    except (OSError, ValueError, AttributeError):
+        return DEFAULT_THEME
+
+
+# 直接執行（或截圖工具指定風格）時才套用；測試以模組載入，維持預設風格
+if __name__ == "__main__" or os.environ.get("DAYNOTE_THEME"):
+    apply_theme(saved_theme())
+
 FONT = (UI_FONT, 10)
 SMALL = (UI_FONT, 8)
 # 標題類字型：有思源宋體（Noto Serif TC）就用襯線字，否則維持正黑體；由 apply_fonts() 於啟動時決定
@@ -206,10 +267,15 @@ def apply_fonts(root):
     installed = set(tkfont.families(root))
     ICON_GLYPH_FONT = next((name for name in ICON_FAMILIES if name in installed), None)
     serif = next((name for name in SERIF_FAMILIES if name in installed), None)
-    if serif:
-        TITLE_FONT = (serif, 16, "bold")
-        HEADING_FONT = (serif, 11, "bold")
+    fonts = THEME_FONTS  # 依目前風格決定標題字級與是否用襯線字
+    if fonts["serif"] and serif:
+        TITLE_FONT = (serif, fonts["title"], "bold")
+        HEADING_FONT = (serif, fonts["heading"], "bold")
         SUBJECT_FONT = (serif, 14, "bold")
+    elif not fonts["serif"]:
+        TITLE_FONT = (UI_FONT, fonts["title"], "bold")
+        HEADING_FONT = (UI_FONT, fonts["heading"], "bold")
+        SUBJECT_FONT = (UI_FONT, 14, "bold")
 WEEK_HEAD = "日一二三四五六"   # 月曆以星期日為第一欄
 WEEKDAY_NAME = "一二三四五六日"  # 對應 date.weekday()
 
@@ -2486,17 +2552,39 @@ class App(tk.Tk):
             return
         if not self.cancel_new_task(ask=ask):  # 新增頁還沒建立的內容：詢問是否放棄
             return
-        state = dict(self.state_data, topmost=self.topmost, scale=SCALE)
-        if self.winfo_x() > -30000:  # 縮小中 Windows 回報 -32000，此時沿用上次存的位置
-            state.update(x=self.winfo_x(), y=self.winfo_y(),
-                         w=self.winfo_width(), h=self.winfo_height())
-        save_state(state)
+        self._save_window_state()
         for hotkey_id in self.hotkeys_registered:
             win_unregister_hotkey(self, hotkey_id)
         self.hotkeys_registered.clear()
         if getattr(self, "_poll_job", None):
             self.after_cancel(self._poll_job)
         self.destroy()
+
+    def _save_window_state(self):
+        """視窗位置、大小、置頂與其他狀態寫進 state.json（關閉、重新啟動前呼叫）。"""
+        state = dict(self.state_data, topmost=self.topmost, scale=SCALE)
+        if self.winfo_x() > -30000:  # 縮小中 Windows 回報 -32000，此時沿用上次存的位置
+            state.update(x=self.winfo_x(), y=self.winfo_y(),
+                         w=self.winfo_width(), h=self.winfo_height())
+        save_state(state)
+
+    def set_theme(self, key):
+        """換風格：記住選擇後重新啟動 DayNote 套用（畫面所有顏色在建立時就決定，無法即時替換）。"""
+        if key == CURRENT_THEME or key not in THEMES:
+            return
+        self.state_data["theme"] = key
+        self._save_window_state()
+        self._set_status(f"正在換成「{THEMES[key]['name']}」…")
+        self.restart()
+
+    def restart(self):
+        """開新的一份 DayNote；新的寫入 PID 後舊的會自行存檔關閉，保險起見稍後也主動關閉。"""
+        try:
+            subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=ROOT_DIR)
+        except OSError:
+            self._set_status("無法自動重新啟動，請關閉後重新打開 DayNote 套用新風格", error=True)
+            return
+        self.after(RESTART_CLOSE_MS, lambda: self.close(ask=False))
 
     def _flush_detail_on_close(self, ask=True):
         """關閉前若詳細頁有未儲存的修改：詢問儲存／不儲存／取消。可以繼續關閉時回傳 True。
@@ -2546,11 +2634,13 @@ class App(tk.Tk):
     # ---- 版面
 
     def _build(self):
+        # 頂部：第一列只放右上角按鈕，第二列是大標題（佔滿整個寬度，字級放大也不會被按鈕切到）
         top = tk.Frame(self, bg=BG)
         top.pack(fill="x", padx=(px(18), px(6)), pady=(px(6), 0))
-        # 右側按鈕群先 pack，空間不足時被壓縮的是日期標題，而不是按鈕
-        tools = tk.Frame(top, bg=BG)
-        tools.pack(side="right", anchor="n", pady=(px(18), 0))  # 按鈕固定在右上角；離上緣留空白，太貼邊會有壓迫感
+        tools_row = tk.Frame(top, bg=BG)
+        tools_row.pack(fill="x", pady=(px(8), 0))  # 離上緣留空白，太貼邊會有壓迫感
+        tools = tk.Frame(tools_row, bg=BG)
+        tools.pack(side="right", anchor="n")
         # 未登入時才出現；用和其他按鈕一致的膠囊樣式
         self.btn_login = Pill(tools, "登入", self.login, style="primary", font=(UI_FONT, 9), padx=10, pady=2)
         Tooltip(self.btn_login, "用瀏覽器登入 Google 帳號")
@@ -2559,11 +2649,19 @@ class App(tk.Tk):
         self.menu_more = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
                                  activeforeground=TEXT, bd=0, relief="flat", font=FONT)
         self.menu_more.add_command(label="使用說明與快捷鍵（F1）", command=self.open_help)
+        # 風格：單選，目前的風格前面打勾；換風格要重建整個畫面，所以會重新啟動 DayNote
+        self.menu_theme = tk.Menu(self.menu_more, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
+                                  activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        self.theme_var = tk.StringVar(self, value=CURRENT_THEME)
+        for key, theme in THEMES.items():
+            self.menu_theme.add_radiobutton(label=theme["name"], value=key, variable=self.theme_var,
+                                            command=lambda k=key: self.set_theme(k))
+        self.menu_more.add_cascade(label="風格", menu=self.menu_theme)
         self.menu_more.add_separator()
         self.menu_more.add_command(label="立即同步（F5）", command=self.refresh)
         self.menu_more.add_separator()
         self.menu_more.add_command(label="登出 Google", command=self.logout)
-        self.btn_more = self._icon_button(tools, "⋯", self._open_more_menu, tip="更多：使用說明、同步、登出")
+        self.btn_more = self._icon_button(tools, "⋯", self._open_more_menu, tip="更多：使用說明、風格、同步、登出")
         self.btn_more.pack(side="left")
         self.btn_pin = self._icon_button(
             tools, "📌", self.toggle_topmost,
@@ -2578,11 +2676,10 @@ class App(tk.Tk):
         if self.borderless:
             self.btn_min.pack(side="left")
             btn_close.pack(side="left")
-        self.lbl_date = tk.Label(top, font=TITLE_FONT, bg=BG, anchor="w")
-        # 標題往下留白，帶動下方月曆與清單整體下移；右上角按鈕位置不變
-        self.lbl_date.pack(side="left", fill="x", expand=True, pady=(px(26), 0))
-        # 頂部列（含日期文字）當拖曳區
-        for widget in (top, self.lbl_date):
+        self.lbl_date = tk.Label(top, font=TITLE_FONT, bg=BG, fg=TEXT, anchor="w")
+        self.lbl_date.pack(fill="x", pady=(0, 0))
+        # 頂部（含日期文字）當拖曳區
+        for widget in (top, tools_row, self.lbl_date):
             widget.bind("<Button-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._on_drag)
 

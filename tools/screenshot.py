@@ -3,6 +3,7 @@
 用法（在 DayNote 資料夾執行）：
     python tools/screenshot.py                          # 主畫面 → docs/images/00-app.png
     python tools/screenshot.py --page detail --out x.png
+    python tools/screenshot.py --theme night --out night.png   # 指定風格：cream、editorial、night、nordic
 
 可截的畫面（--page）：
     main       主畫面（預設，週檢視）        month      主畫面展開整月
@@ -33,6 +34,9 @@ from ctypes import wintypes
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # DayNote 資料夾
 sys.path.insert(0, ROOT)
+# --theme 必須在載入 DayNote 之前決定（顏色在模組載入時就套用），所以先從命令列取出
+if "--theme" in sys.argv[:-1]:
+    os.environ["DAYNOTE_THEME"] = sys.argv[sys.argv.index("--theme") + 1]
 from tests.test_app_gui import HOLIDAY_CAL, StoreGoogle, daynote, pump, settle  # noqa: E402
 
 PAGES = ("main", "month", "daytip", "help", "detail", "new", "loggedout", "quick", "quicktype", "toast")
@@ -155,6 +159,7 @@ def main():
     parser = argparse.ArgumentParser(description="產生 DayNote 畫面截圖（使用假資料）")
     parser.add_argument("--page", choices=PAGES, default="main")
     parser.add_argument("--out", default=DEFAULT_OUT)
+    parser.add_argument("--theme", choices=list(daynote.THEMES), help="風格（預設 cream）")
     parser.add_argument("--width", type=int, help="視窗寬度（100%% 縮放的像素）；預設維持 DayNote 預設大小")
     args = parser.parse_args()
 
