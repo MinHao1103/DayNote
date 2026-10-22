@@ -484,14 +484,14 @@ def win_has_appwindow(widget):
 
 
 def win_round_corners(widget):
-    """Windows 11 圓角（DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND）；不支援的系統直接略過。"""
+    """Windows 11 圓角（DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND）；成功回傳 True，不支援的系統直接略過。"""
     try:
         dwmapi = ctypes.WinDLL("dwmapi")
         preference = ctypes.c_int(2)
-        dwmapi.DwmSetWindowAttribute(_hwnd(widget), 33, ctypes.byref(preference),
-                                     ctypes.sizeof(preference))
+        return dwmapi.DwmSetWindowAttribute(_hwnd(widget), 33, ctypes.byref(preference),
+                                            ctypes.sizeof(preference)) == 0  # S_OK
     except (OSError, AttributeError):
-        pass
+        return False
 
 
 def win_border_color(widget, color):
@@ -503,6 +503,17 @@ def win_border_color(widget, color):
                                                       ctypes.sizeof(colorref))
     except (OSError, AttributeError):
         pass
+
+
+def win_style_popup(win):
+    """無邊框小視窗（快速列、提醒）比照主視窗：系統圓角＋暖色外框。
+
+    圓角成功時拿掉 Tk 自己畫的 1px 方框，否則圓角處會出現雙層框線；Windows 10 等不支援時保留方框。
+    """
+    win.update_idletasks()  # 確保 Windows 視窗已建立，設定才會套到正確的 HWND
+    if win_round_corners(win):
+        win_border_color(win, BORDER)
+        win.configure(highlightthickness=0)
 
 
 def win_minimize(widget):
@@ -1727,6 +1738,7 @@ class ReminderToast:
 
         ReminderToast.active.append(self)
         ReminderToast.relayout()
+        win_style_popup(win)
         try:
             winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
         except RuntimeError:
@@ -1808,6 +1820,7 @@ class QuickBar:
 
         self.render()
         self._place()
+        win_style_popup(win)
         win.lift()
         win.focus_force()
         self.entry.focus_force()
@@ -1879,7 +1892,11 @@ class QuickBar:
                 self.header.config(text=f"找到 {len(self.items)} 件" if query else "輸入要找的文字")
             else:
                 self.items = app.today_agenda()
-                self.header.config(text=f"今天還有 {len(self.items)} 件" if self.items else "今天的待辦都完成了")
+                # 逾期分開算，避免把以前沒做完的也當成「今天」的件數
+                overdue = sum(1 for t in self.items if t["due"] and t["due"] < today)
+                left = len(self.items) - overdue
+                self.header.config(text=(f"今天還有 {left} 件" + (f" · 逾期 {overdue} 件" if overdue else ""))
+                                   if self.items else "今天的待辦都完成了")
         self.items = self.items[:self.MAX_ROWS]
         self.selected = min(self.selected, max(len(self.items) - 1, 0))
         self._render_rows(today)

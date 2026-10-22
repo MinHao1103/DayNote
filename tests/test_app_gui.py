@@ -287,6 +287,7 @@ class AppTestCase(unittest.TestCase):
             unittest.mock.patch.object(daynote, "win_is_pinned", lambda w: True),
             unittest.mock.patch.object(daynote, "win_round_corners", lambda w: None),
             unittest.mock.patch.object(daynote, "win_border_color", lambda w, c: None),
+            unittest.mock.patch.object(daynote, "win_style_popup", lambda w: None),
             unittest.mock.patch.object(daynote, "win_set_background_window", lambda w: None),
             unittest.mock.patch.object(daynote, "win_hook_messages", lambda w, **kw: object()),
             unittest.mock.patch.object(daynote, "win_register_hotkey",
@@ -1546,7 +1547,7 @@ class QuickBarTest(AppTestCase):
         # Then: 逾期在前、今天依時間，明天的不列
         shown = texts(bar.win)
         self.assertIs(self.app.focus_get(), bar.entry)
-        self.assertIn("今天還有 3 件", shown)
+        self.assertIn("今天還有 2 件 · 逾期 1 件", shown)
         self.assertEqual([t["title"] for t in bar.items], ["回信", "晨會", "寫週報"])
         self.assertIn(daynote.QuickBar.EXAMPLE, shown)
 
