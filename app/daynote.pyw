@@ -1718,14 +1718,12 @@ class ReminderToast:
 
         buttons = tk.Frame(body, bg=BG)
         buttons.pack(fill="x")
-        done = tk.Label(buttons, text="✓ 完成", bg=ACCENT, fg=ON_ACCENT, font=FONT, cursor="hand2",
-                        padx=px(12), pady=px(3))
+        # 膠囊按鈕和主視窗一致；延後按鈕寫明「再提醒」，第一次看到的人不用猜
+        done = Pill(buttons, "✓ 完成", lambda: (self.close(), on_done()), style="primary", padx=12, pady=3)
         done.pack(side="right")
-        done.bind("<Button-1>", lambda e: (self.close(), on_done()))
-        snooze = tk.Label(buttons, text="10 分鐘後", bg=CARD_BG, fg=TEXT, font=FONT, cursor="hand2",
-                          padx=px(12), pady=px(3), highlightthickness=1, highlightbackground=BORDER)
+        snooze = Pill(buttons, f"{REMINDER_SNOOZE_MIN} 分鐘後再提醒", lambda: (self.close(), on_snooze()),
+                      style="outline", padx=12, pady=3)
         snooze.pack(side="right", padx=(0, px(8)))
-        snooze.bind("<Button-1>", lambda e: (self.close(), on_snooze()))
 
         ReminderToast.active.append(self)
         ReminderToast.relayout()
@@ -2873,12 +2871,14 @@ class App(tk.Tk):
         self.draft_list.pack(side="left", padx=px(8))
         Tooltip(self.draft_list, "要放進哪個清單；也可以新增清單")
 
+        # 欄位標籤一律放在輸入框上方，和「詳細資訊」一致
+        tk.Label(view, text="標題（必填）", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(
+            fill="x", pady=(px(8), 0), **pad)
         self.draft_title = self._rounded_field(
             view, lambda parent: tk.Entry(parent, font=SUBJECT_FONT, relief="flat",
                                           bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),
-            pady=(px(8), px(2)), **pad)
+            pady=(px(2), px(8)), **pad)
         self.draft_title.insert(0, draft["title_draft"])
-        tk.Label(view, text="標題（必填）", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(0, px(6)), **pad)
 
         tk.Label(view, text="詳細資訊", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", **pad)
         self.draft_notes = self._rounded_field(
@@ -3053,17 +3053,21 @@ class App(tk.Tk):
         task = self.detail["task"]
         pad = {"padx": px(18)}
 
-        # 清單名稱與刪除放同一列：刪除平常是灰色圖示，滑過才轉紅，避免搶走注意力
+        # 上方列：左邊「← 返回」（和新增頁同位置，修改會自動儲存）；右邊刪除，平常是灰色圖示，滑過才轉紅
         bar = tk.Frame(view, bg=BG)
-        bar.pack(fill="x", pady=(px(8), 0), **pad)
+        bar.pack(fill="x", pady=(px(6), px(2)), **pad)
+        btn_back = Pill(bar, "← 返回", self.close_detail, style="ghost", padx=8, pady=3)
+        btn_back.pack(side="left")
+        Tooltip(btn_back, "返回；有修改會自動儲存（Esc）")
+        self.btn_detail_back = btn_back
         btn_delete = self._icon_button(bar, "刪除", self.delete_detail, font=FONT, tip="刪除這筆工作")
         if ICON_GLYPH_FONT:
             btn_delete.config(text="", font=(ICON_GLYPH_FONT, 11))
         btn_delete.bind("<Enter>", lambda e: btn_delete.config(fg=RED), add="+")
         btn_delete.bind("<Leave>", lambda e: btn_delete.config(fg=GRAY), add="+")
         btn_delete.pack(side="right")
-        tk.Label(bar, text=f"清單：{task['list_title']}", bg=BG, fg=GRAY, font=SMALL,
-                 anchor="w").pack(side="left", fill="x")
+        tk.Label(view, text=f"清單：{task['list_title']}", bg=BG, fg=GRAY, font=SMALL,
+                 anchor="w").pack(fill="x", **pad)
         self.detail_title = self._rounded_field(
             view, lambda parent: tk.Entry(parent, font=SUBJECT_FONT, relief="flat",
                                           bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),

@@ -941,6 +941,20 @@ class DetailTest(AppTestCase):
         self.assertEqual(self.g.tasks[task_id]["title"], "寫週報（急）")
         self.assertTrue(app.main_view.winfo_ismapped())
 
+    def test_back_button_saves(self):
+        """詳細頁按「← 返回」 > 自動儲存並回到主畫面"""
+        # Given: 一筆任務
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        # When: 修改標題後按返回
+        self.open("寫週報")
+        app.detail_title.insert("end", "（急）")
+        click(app.btn_detail_back)
+        settle(app)
+        # Then: 已儲存、回到主畫面
+        self.assertEqual(self.g.tasks[task_id]["title"], "寫週報（急）")
+        self.assertTrue(app.main_view.winfo_ismapped())
+
     def test_no_change_no_request(self):
         """詳細頁沒有修改就返回 > 不送出任何修改"""
         # Given: 一筆任務
@@ -1454,13 +1468,13 @@ class ReminderTest(AppTestCase):
         self.assertEqual(daynote.ReminderToast.active, [])
 
     def test_reminder_snooze(self):
-        """提醒視窗按「10 分鐘後」 > 關閉並記錄延後，狀態寫入暫存 data"""
+        """提醒視窗按「10 分鐘後再提醒」 > 關閉並記錄延後，狀態寫入暫存 data"""
         # Given: 跳出的提醒
         self.seed_due_now()
         app = self.start()
         app._check_reminders()
         # When: 延後
-        click(find_label(self.toast().win, "10 分鐘後"))
+        click(find_label(self.toast().win, "10 分鐘後再提醒"))
         # Then: 延後 10 分鐘
         self.assertEqual(daynote.ReminderToast.active, [])
         self.assertEqual(self.status(), "10 分鐘後再提醒")
