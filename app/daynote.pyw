@@ -1568,6 +1568,223 @@ class ThinScrollbar(tk.Canvas):
             self.command("moveto", start_first + (event.y - start_y) / max(self.winfo_height(), 1))
 
 
+class PopupMenu:
+    """圓角選單：取代 Windows 原生選單（原生選單的形狀改不了）。介面比照 tk.Menu 用到的部分：
+
+    add_command／add_radiobutton／add_cascade／add_separator 建立項目；invoke／entrycget／entryconfig 以標籤
+    指定項目；tk_popup(x, y) 在螢幕座標顯示。滑過的項目畫圓角底色；點項目、按 Esc、點到選單外面都會收起。
+    鍵盤：↑ ↓ 移動、Enter 執行、→ 打開子選單、← 回上一層。
+    """
+
+    ROW_H = 30
+
+    def __init__(self, master):
+        self.master = master
+        self.items = []            # 每項：dict(kind, label, command, state, value, variable, menu, checked)
+        self.win = None
+        self.parent = None         # 子選單的上一層
+        self.child = None          # 目前打開的子選單
+        self.rows = []             # 顯示中的 (項目, Canvas)
+        self.active = None         # 鍵盤或滑鼠目前所在的列（rows 的索引）
+
+    # ---- 建立項目（比照 tk.Menu）
+    def add_command(self, label, command=None, state="normal", checked=False):
+        self.items.append({"kind": "command", "label": label, "command": command, "state": state,
+                           "checked": checked})
+
+    def add_radiobutton(self, label, value, variable, command=None, state="normal"):
+        self.items.append({"kind": "radio", "label": label, "value": value, "variable": variable,
+                           "command": command, "state": state})
+
+    def add_cascade(self, label, menu, state="normal"):
+        menu.parent = self
+        self.items.append({"kind": "cascade", "label": label, "menu": menu, "state": state})
+
+    def add_separator(self):
+        self.items.append({"kind": "separator", "label": None})
+
+    def _item(self, label):
+        item = next((i for i in self.items if i["label"] == label), None)
+        if item is None:
+            raise tk.TclError(f"選單沒有「{label}」")
+        return item
+
+    def entrycget(self, label, option):
+        return self._item(label)[option]
+
+    def entryconfig(self, label, **options):
+        self._item(label).update(options)
+
+    def invoke(self, label):
+        """執行項目（停用的不執行）；radiobutton 先設定變數再呼叫 command。"""
+        item = self._item(label)
+        if item.get("state") == "disabled" or item["kind"] in ("separator", "cascade"):
+            return
+        if item["kind"] == "radio":
+            item["variable"].set(item["value"])
+        if item.get("command"):
+            item["command"]()
+
+    # ---- 顯示
+    def tk_popup(self, x, y, align="left", flip_y=None):
+        """在螢幕座標 (x, y) 顯示。align="right"：x 是選單右緣；flip_y：下方放不下時改成底緣對齊這個 y（往上開）。"""
+        self.close()
+        win = self.win = tk.Toplevel(self.master)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
+        body = tk.Frame(win, bg=CARD_BG, padx=px(4), pady=px(4))
+        body.pack()
+        font = tkfont.Font(root=win, font=FONT)
+        marks = any(i["kind"] == "radio" or i.get("checked") for i in self.items)
+        arrows = any(i["kind"] == "cascade" for i in self.items)
+        self.mark_w = px(22) if marks else 0
+        text_w = max([font.measure(i["label"]) for i in self.items if i["label"]] + [px(80)])
+        self.width = px(12) + self.mark_w + text_w + (px(26) if arrows else 0) + px(16)
+        self.rows, self.active = [], None
+        for item in self.items:
+            if item["kind"] == "separator":
+                tk.Frame(body, bg=BORDER, height=1).pack(fill="x", padx=px(10), pady=px(4))
+                continue
+            row = tk.Canvas(body, width=self.width, height=px(self.ROW_H), bg=CARD_BG, highlightthickness=0,
+                            cursor="" if item.get("state") == "disabled" else "hand2")
+            row.pack()
+            index = len(self.rows)
+            self.rows.append((item, row))
+            self._draw_row(index, False)
+            row.bind("<Enter>", lambda e, i=index: self._hover(i))
+            row.bind("<Button-1>", lambda e, i=index: self._click(i))
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        if align == "right":
+            x -= w
+        screen = win_virtual_screen()
+        if screen and flip_y is not None and y + h > screen[3]:
+            y = flip_y - h
+        if screen:  # 超出螢幕就往內收（右邊放不下的子選單改到左邊）
+            if x + w > screen[2]:
+                x = (self.parent.win.winfo_rootx() - w + px(4)) if self.parent and self.parent.win else screen[2] - w
+            x, y = max(x, screen[0]), min(max(y, screen[1]), screen[3] - h)
+        win.geometry(f"+{x}+{y}")
+        win_style_popup(win)
+        for sequence, handler in (("<Escape>", lambda e: self._back()), ("<Up>", lambda e: self._step(-1)),
+                                  ("<Down>", lambda e: self._step(1)), ("<Return>", lambda e: self._enter()),
+                                  ("<Right>", lambda e: self._open_child_keyboard()),
+                                  ("<Left>", lambda e: self._back() if self.parent else None)):
+            win.bind(sequence, handler)
+        win.bind("<FocusOut>", lambda e: win.after(80, self._close_if_unfocused))
+        win.focus_force()
+
+    def _draw_row(self, index, hover):
+        item, row = self.rows[index]
+        row.delete("all")
+        disabled = item.get("state") == "disabled"
+        h = px(self.ROW_H)
+        if hover and not disabled:  # 滑過：圓角底色
+            draw_rounded(row, self.width - px(4), h - px(2), px(8), ACCENT_SOFT, CARD_BG, tag="hover",
+                         x0=px(2), y0=px(1))
+        fg = FADED_TEXT if disabled else TEXT
+        checked = (item["kind"] == "radio" and item["variable"].get() == item["value"]) or item.get("checked")
+        if checked:
+            mark, font = (GLYPHS["✓"], (ICON_GLYPH_FONT, 9)) if ICON_GLYPH_FONT else ("✓", FONT)
+            row.create_text(px(12) + self.mark_w // 2, h // 2, text=mark, fill=ACCENT, font=font)
+        row.create_text(px(12) + self.mark_w, h // 2, text=item["label"], fill=fg, font=FONT, anchor="w")
+        if item["kind"] == "cascade":
+            arrow, font = (GLYPHS["▶"], (ICON_GLYPH_FONT, 8)) if ICON_GLYPH_FONT else ("▶", SMALL)
+            row.create_text(self.width - px(16), h // 2, text=arrow, fill=GRAY, font=font)
+
+    def _hover(self, index):
+        if self.active is not None and self.active != index and self.active < len(self.rows):
+            self._draw_row(self.active, False)
+        self.active = index
+        self._draw_row(index, True)
+        item = self.rows[index][0]
+        if self.child and (item["kind"] != "cascade" or item["menu"] is not self.child):
+            self.child.close()
+            self.child = None
+        if item["kind"] == "cascade" and item.get("state") != "disabled" and not self.child:
+            self._open_child(index, focus=False)
+
+    def _click(self, index):
+        item = self.rows[index][0]
+        if item.get("state") == "disabled":
+            return
+        if item["kind"] == "cascade":
+            self._open_child(index, focus=True)
+            return
+        self.root_menu().close()  # 先收起整串選單再執行（執行的動作可能會重建畫面）
+        self.invoke(item["label"])
+
+    def _open_child(self, index, focus):
+        item, row = self.rows[index]
+        self.child = item["menu"]
+        self.child.tk_popup(self.win.winfo_rootx() + self.win.winfo_width() - px(4), row.winfo_rooty() - px(5))
+        if not focus:
+            self.win.focus_force()  # 滑鼠帶出的子選單：焦點留在本層，鍵盤操作不被搶走
+
+    def _open_child_keyboard(self):
+        if self.active is not None and self.rows[self.active][0]["kind"] == "cascade":
+            self._open_child(self.active, focus=True)
+            self.child._step(1)
+
+    def _step(self, delta):
+        enabled = [i for i, (item, _) in enumerate(self.rows) if item.get("state") != "disabled"]
+        if not enabled:
+            return
+        if self.active not in enabled:
+            target = enabled[0] if delta > 0 else enabled[-1]
+        else:
+            target = enabled[(enabled.index(self.active) + delta) % len(enabled)]
+        self._hover(target)
+
+    def _enter(self):
+        if self.active is not None:
+            self._click(self.active)
+
+    def _back(self):
+        """Esc／←：子選單回到上一層，最上層則整個收起。"""
+        parent = self.parent
+        self.close()
+        if parent and parent.win:
+            parent.child = None
+            parent.win.focus_force()
+
+    def root_menu(self):
+        menu = self
+        while menu.parent and menu.parent.win:
+            menu = menu.parent
+        return menu
+
+    def _close_if_unfocused(self):
+        """焦點離開整串選單（點到外面、切到別的程式）就全部收起。"""
+        root = self.root_menu()
+        try:
+            focus = str(self.master.focus_get() or "")
+        except (KeyError, tk.TclError):
+            focus = ""
+        menu, inside = root, False
+        while menu:
+            if menu.win and focus.startswith(str(menu.win)):
+                inside = True
+            menu = menu.child
+        if not inside:
+            root.close()
+
+    def is_open(self):
+        return bool(self.win) and self.win.winfo_exists()
+
+    def close(self):
+        """收起這一層與它打開的子選單。"""
+        if self.child:
+            self.child.close()
+            self.child = None
+        if self.win is not None:
+            if self.win.winfo_exists():
+                self.win.destroy()
+            self.win = None
+        self.rows, self.active = [], None
+
+
 class RoundedBox(tk.Canvas):
     """圓角外框容器：內容放在 self.inner（Frame），高度跟著內容、寬度跟著版面；可切換外框顏色（例如取得焦點時）。"""
 
@@ -2008,8 +2225,7 @@ class ReminderToast:
         self.btn_more_snooze = more
         snooze = Pill(buttons, f"{default}再提醒", lambda: self.snooze(0), style="outline", padx=12, pady=3)
         snooze.pack(side="right", padx=(0, px(4)))
-        self.snooze_menu = tk.Menu(win, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
-                                   activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        self.snooze_menu = PopupMenu(win)
         for index, (label, _) in enumerate(snooze_options(dt.datetime.now())[1:], start=1):
             self.snooze_menu.add_command(label=f"{label}再提醒", command=lambda i=index: self.snooze(i))
 
@@ -2028,8 +2244,10 @@ class ReminderToast:
         self.on_snooze(label, fire_at)
 
     def _open_snooze_menu(self):
-        self.snooze_menu.tk_popup(self.btn_more_snooze.winfo_rootx(),
-                                  self.btn_more_snooze.winfo_rooty() + self.btn_more_snooze.winfo_height())
+        # 提醒在螢幕右下角：選單右緣對齊按鈕，下方放不下就往上開
+        btn = self.btn_more_snooze
+        self.snooze_menu.tk_popup(btn.winfo_rootx() + btn.winfo_width(), btn.winfo_rooty() + btn.winfo_height() + px(4),
+                                  align="right", flip_y=btn.winfo_rooty() - px(4))
 
     @classmethod
     def relayout(cls):
@@ -2737,12 +2955,10 @@ class App(tk.Tk):
         Tooltip(self.btn_login, "用瀏覽器登入 Google 帳號")
         # 同步、登出這類不常用（登出還會撤銷授權）的動作收進「⋯」選單：
         # 不再緊鄰關閉鈕而誤按，右上角也只剩圖示按鈕，和 Windows 11 標題列一致
-        self.menu_more = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
-                                 activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        self.menu_more = PopupMenu(self)
         self.menu_more.add_command(label="使用說明與快捷鍵（F1）", command=self.open_help)
         # 風格：單選，目前的風格前面打勾；選了立即套用
-        self.menu_theme = tk.Menu(self.menu_more, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
-                                  activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        self.menu_theme = PopupMenu(self)
         self.theme_var = tk.StringVar(self, value=self.state_data.get("theme", CURRENT_THEME))
         self.menu_theme.add_radiobutton(label=AUTO_THEME_NAME, value=AUTO_THEME, variable=self.theme_var,
                                         command=lambda: self.set_theme(AUTO_THEME))
@@ -3376,10 +3592,10 @@ class App(tk.Tk):
 
     def _open_draft_list_menu(self, anchor):
         """新增頁的清單選單：列出所有清單（目前的打勾）與「新增清單」。"""
-        menu = tk.Menu(self, tearoff=0, font=FONT)
+        menu = self.draft_list_menu = PopupMenu(self)
         for index, lst in enumerate(self.lists):
-            mark = "✓ " if index == self.draft["list_index"] else "　 "
-            menu.add_command(label=mark + lst.get("title", ""), command=lambda i=index: self.choose_draft_list(i))
+            menu.add_command(label=lst.get("title", ""), command=lambda i=index: self.choose_draft_list(i),
+                             checked=index == self.draft["list_index"])
         menu.add_separator()
         menu.add_command(label=ADD_LIST_OPTION, command=lambda: self.choose_draft_list(len(self.lists)))
         menu.tk_popup(anchor.winfo_rootx(), anchor.winfo_rooty() + anchor.winfo_height())
@@ -4025,9 +4241,9 @@ class App(tk.Tk):
 
     def _open_more_menu(self):
         """在「⋯」按鈕正下方展開選單，右緣對齊按鈕。"""
-        x = self.btn_more.winfo_rootx() + self.btn_more.winfo_width() - self.menu_more.winfo_reqwidth()
+        x = self.btn_more.winfo_rootx() + self.btn_more.winfo_width()
         y = self.btn_more.winfo_rooty() + self.btn_more.winfo_height() + px(4)
-        self.menu_more.tk_popup(max(x, 0), y)
+        self.menu_more.tk_popup(x, y, align="right")
 
     def logout(self):
         if self.busy or not self.g.refresh_token:
@@ -4149,8 +4365,7 @@ class App(tk.Tk):
 
     def _build_task_menu(self, task):
         """待辦的右鍵選單：改日期（今天／明天／不排日期）、完成、開啟詳細資訊。子工作跟著父任務，不提供改日期。"""
-        menu = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
-                       activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        menu = PopupMenu(self)
         if not self._is_child(task):
             today = self.today
             for label, day in (("移到今天", today), ("移到明天", today + dt.timedelta(days=1)), ("不排日期", None)):

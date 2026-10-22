@@ -9,6 +9,7 @@
     main       主畫面（預設，週檢視）        month      主畫面展開整月
     daytip     滑鼠停在今天的日期上（月曆提示）  help       使用說明與快捷鍵（F1）
     datepicker／timepicker／recurpicker  詳細頁的日期／提醒時間／重複選擇器
+    moremenu   「⋯」選單（展開「風格」子選單）  taskmenu   待辦的右鍵選單  snoozemenu  提醒的延後選單
     detail     工作詳細資訊                  new        新增工作
     loggedout  尚未登入                      quick      快速列（Ctrl + Alt + D）
     quicktype  快速列輸入中（顯示辨識結果）  toast      右下角提醒
@@ -40,7 +41,8 @@ if "--theme" in sys.argv[:-1]:
     os.environ["DAYNOTE_THEME"] = sys.argv[sys.argv.index("--theme") + 1]
 from tests.test_app_gui import HOLIDAY_CAL, StoreGoogle, daynote, pump, settle  # noqa: E402
 
-PAGES = ("main", "month", "daytip", "help", "datepicker", "timepicker", "recurpicker", "detail", "new", "loggedout", "quick", "quicktype", "toast")
+PAGES = ("main", "month", "daytip", "help", "datepicker", "timepicker", "recurpicker", "moremenu", "taskmenu",
+         "snoozemenu", "detail", "new", "loggedout", "quick", "quicktype", "toast")
 DEFAULT_OUT = os.path.join(ROOT, "docs", "images", "00-app.png")
 
 
@@ -138,6 +140,28 @@ def open_page(app, g, page, today):
         left, top, right, _ = app._cal_cell_rect(today)
         app.cal.event_generate("<Motion>", x=(left + right) // 2, y=top + 5)
         pump(app, 0.7)  # 提示在停留 0.5 秒後出現
+    elif page == "moremenu":
+        app._open_more_menu()
+        app.update()
+        app.menu_more._step(1)
+        app.menu_more._step(1)
+        app.menu_more._open_child_keyboard()
+        return [app, app.menu_more.win, app.menu_theme.win]
+    elif page == "taskmenu":
+        task = next(t for t in app.tasks if t["title"] == "回信給客戶")
+        menu = app._build_task_menu(task)
+        menu.tk_popup(app.winfo_rootx() + daynote.px(120), app.winfo_rooty() + daynote.px(330))
+        app.update()
+        menu._step(1)
+        return [app, menu.win]
+    elif page == "snoozemenu":
+        task = next(t for t in app.tasks if t["title"] == "回信給客戶")
+        toast = daynote.ReminderToast(app, task, dt.datetime.combine(today, task["time"]),
+                                      lambda: None, lambda *a: None)
+        pump(app, 0.3)
+        toast._open_snooze_menu()
+        app.update()
+        return [toast.win, toast.snooze_menu.win]
     elif page == "help":
         app.open_help()
         return app.help_win
@@ -215,8 +239,14 @@ def main():
         pump(app, 0.3)
     target = open_page(app, g, args.page, today)
     pump(app, 0.8)  # 等視窗與 DWM 圓角、陰影畫完
-    target.update_idletasks()
-    x, y, w, h = target.winfo_rootx(), target.winfo_rooty(), target.winfo_width(), target.winfo_height()
+    windows = target if isinstance(target, list) else [target]  # 選單等多個視窗：截下全部的聯集
+    for win in windows:
+        win.update_idletasks()
+    left = min(win.winfo_rootx() for win in windows)
+    top = min(win.winfo_rooty() for win in windows)
+    right = max(win.winfo_rootx() + win.winfo_width() for win in windows)
+    bottom = max(win.winfo_rooty() + win.winfo_height() for win in windows)
+    x, y, w, h = left, top, right - left, bottom - top
     write_png(args.out, grab(x, y, w, h), w, h)
     app.destroy()
     print(f"已存檔：{args.out}（{w}×{h}）")

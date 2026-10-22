@@ -542,6 +542,50 @@ class StartupTest(AppTestCase):
         self.assertEqual(app.detail_title.get(), "寫週報（急）")
         self.assertEqual(app.cget("bg"), daynote.THEMES["nordic"]["colors"]["BG"])
 
+    def test_rounded_menu_popup(self):
+        """打開「⋯」選單 > 圓角選單顯示各項目；停用的項目點了沒反應；點「使用說明」 > 選單收起並開啟說明"""
+        # Given: 已啟動
+        app = self.start()
+        menu = app.menu_more
+        # When: 顯示選單
+        menu.tk_popup(app.winfo_rootx() + 20, app.winfo_rooty() + 20)
+        app.update()
+        # Then: 項目都在
+        labels = [item["label"] for item, _ in menu.rows]
+        self.assertEqual(labels, ["使用說明與快捷鍵（F1）", "風格", "立即同步（F5）", "登出 Google"])
+        # When: 點使用說明
+        menu._click(0)
+        app.update()
+        # Then: 選單收起、說明開啟
+        self.assertFalse(menu.is_open())
+        self.assertTrue(app.help_win.winfo_exists())
+
+    def test_rounded_menu_keyboard_and_cascade(self):
+        """選單用 ↓ 移到「風格」、→ 打開子選單 > 子選單顯示所有風格，目前的打勾；Esc 回上一層"""
+        # Given: 打開的「⋯」選單
+        app = self.start()
+        menu = app.menu_more
+        menu.tk_popup(app.winfo_rootx() + 20, app.winfo_rooty() + 20)
+        app.update()
+        # When: ↓ 兩次到「風格」、→
+        menu._step(1)
+        menu._step(1)
+        menu._open_child_keyboard()
+        app.update()
+        # Then: 子選單打開、列出風格
+        child = app.menu_theme
+        self.assertTrue(child.is_open())
+        names = [item["label"] for item, _ in child.rows]
+        self.assertIn("墨夜（深色）", names)
+        self.assertEqual(app.theme_var.get(), "cream")
+        # When: Esc
+        child._back()
+        app.update()
+        # Then: 子選單收起，上一層還在
+        self.assertFalse(child.is_open())
+        self.assertTrue(menu.is_open())
+        menu.close()
+
     def test_f1_opens_help_once(self):
         """按 F1 兩次 > 只開一個說明視窗"""
         # Given: 已啟動
