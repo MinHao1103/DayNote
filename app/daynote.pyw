@@ -2328,9 +2328,8 @@ class App(tk.Tk):
         # 右側按鈕群先 pack，空間不足時被壓縮的是日期標題，而不是按鈕
         tools = tk.Frame(top, bg=BG)
         tools.pack(side="right", anchor="n", pady=(px(18), 0))  # 按鈕固定在右上角；離上緣留空白，太貼邊會有壓迫感
-        self.btn_login = tk.Label(tools, text="登入", bg=ACCENT, fg=ON_ACCENT, font=FONT,
-                                  padx=px(8), cursor="hand2")
-        self.btn_login.bind("<Button-1>", lambda e: self.login())
+        # 未登入時才出現；用和其他按鈕一致的膠囊樣式
+        self.btn_login = Pill(tools, "登入", self.login, style="primary", font=(UI_FONT, 9), padx=10, pady=2)
         Tooltip(self.btn_login, "用瀏覽器登入 Google 帳號")
         # 同步、登出這類不常用（登出還會撤銷授權）的動作收進「⋯」選單：
         # 不再緊鄰關閉鈕而誤按，右上角也只剩圖示按鈕，和 Windows 11 標題列一致
@@ -3472,12 +3471,14 @@ class App(tk.Tk):
         self.refresh()
 
     def _show_login_button(self, show):
-        """未登入時在「⋯」左邊顯示「登入」；登入後收起來，選單裡的「登出 Google」才可用。"""
+        """未登入時在「⋯」左邊顯示「登入」；登入後收起來，選單裡的「立即同步」「登出 Google」才可用。"""
         if show:
-            self.btn_login.pack(side="left", padx=(0, 4), before=self.btn_more)
+            self.btn_login.pack(side="left", padx=(0, px(4)), before=self.btn_more)
         else:
             self.btn_login.pack_forget()
-        self.menu_more.entryconfig("登出 Google", state="disabled" if show else "normal")
+        state = "disabled" if show else "normal"  # 未登入時同步只會失敗，先停用避免誤會
+        self.menu_more.entryconfig("立即同步（F5）", state=state)
+        self.menu_more.entryconfig("登出 Google", state=state)
 
     def _open_more_menu(self):
         """在「⋯」按鈕正下方展開選單，右緣對齊按鈕。"""

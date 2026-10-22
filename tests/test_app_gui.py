@@ -440,6 +440,7 @@ class StartupTest(AppTestCase):
         self.assertIn("尚未登入 Google", self.list_texts())
         self.assertTrue(app.btn_login.winfo_ismapped())
         self.assertEqual(app.menu_more.entrycget("登出 Google", "state"), "disabled")
+        self.assertEqual(app.menu_more.entrycget("立即同步（F5）", "state"), "disabled")
 
     def test_logout_cancelled(self):
         """登出時按否 > 不撤銷，畫面不變"""
