@@ -1808,6 +1808,25 @@ class WindowTest(AppTestCase):
 
 class QuickBarTest(AppTestCase):
 
+    def setUp(self):
+        super().setUp()
+        # 測試在真的桌面上跑：其他程式搶走焦點時 focus_get() 為 None，快速列會自己關掉而讓案例隨機失敗。
+        # 這裡只讓「焦點移到 DayNote 自己的其他元件」觸發關閉（test_focus_leaving_closes 驗證的情境），
+        # 焦點跑到別的程式時不關閉。
+        original = daynote.QuickBar._close_if_unfocused
+
+        def close_only_when_focus_moves_inside_app(bar):
+            try:
+                focus = bar.win.focus_get()
+            except (KeyError, tk.TclError):
+                focus = None
+            if focus is not None:
+                original(bar)
+        patch = unittest.mock.patch.object(daynote.QuickBar, "_close_if_unfocused",
+                                           close_only_when_focus_moves_inside_app)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def open_bar(self):
         """按 Ctrl + Alt + D 叫出快速列。"""
         self.hotkey_callback(QUICK_KEY)
