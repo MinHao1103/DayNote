@@ -17,6 +17,8 @@ import datetime as dt
 import hashlib
 import http.server
 import json
+import logging
+import logging.handlers
 import os
 import queue
 import re
@@ -43,6 +45,8 @@ CONFIG_PATH = os.path.join(DATA_DIR, "config.json")   # Google 用戶端設定
 TOKEN_PATH = os.path.join(DATA_DIR, "token.bin")      # DPAPI 加密的登入憑證
 STATE_PATH = os.path.join(DATA_DIR, "state.json")     # 視窗位置、提醒記錄等，由程式自動寫入
 PID_PATH = os.path.join(DATA_DIR, "daynote.pid")      # 執行中的程序編號，用來只保留一個 DayNote
+LOG_PATH = os.path.join(DATA_DIR, "daynote.log")      # 提醒觸發紀錄，用來追查「提醒時間不對」
+log = logging.getLogger("daynote")
 # 舊版（所有檔案放在同一層）的位置 → 新位置；啟動時自動搬移
 LEGACY_FILES = {"config.json": CONFIG_PATH, "token.bin": TOKEN_PATH, "daynote_state.json": STATE_PATH}
 
@@ -94,6 +98,9 @@ UNDO_SECONDS = 5
 REMINDER_CHECK_MS = 30 * 1000    # 每 30 秒檢查一次提醒
 REMINDER_SNOOZE_MIN = 10
 REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
+NEXT_UP_TICK_MS = 60 * 1000      # 「下一件」摘要每分鐘更新
+FIRST_RUN_TIP = "小技巧：Ctrl + Alt + D 隨時快速新增，F8 顯示／隱藏"  # 第一次同步成功後在狀態列提示一次
+FIRST_RUN_TIP_MS = 15 * 1000
 ADD_LIST_OPTION = "＋ 新增清單…"  # 清單下拉選單的最後一項
 SELECTED = "#f5e4d8"  # 月曆選中日期：粉彩蜜桃，和強調色同色系
 DIVIDER = "#efe7da"   # 清單列之間的細分隔線
@@ -116,6 +123,25 @@ TITLE_FONT = (UI_FONT, 15, "bold")         # 頁面大標題（日期、工作�
 HEADING_FONT = (UI_FONT, 11)               # 月份、清單區塊標題
 SUBJECT_FONT = (UI_FONT, 14, "bold")       # 詳細頁的工作標題輸入框
 ICON_FONT = ("Segoe UI Symbol", 11)
+# 單色線條圖示：Windows 11 為 Segoe Fluent Icons、Windows 10 為 Segoe MDL2 Assets（字碼相同）
+# 介面文字仍沿用 emoji／符號（測試與 Google Tasks 的詳細資訊都以此辨識），畫面上才換成對應圖示
+ICON_FAMILIES = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
+ICON_GLYPH_FONT = None   # 由 apply_fonts() 決定；None 表示沒有圖示字型，維持原本的符號
+GLYPHS = {"📅": "\ue787", "⏰": "\ue823", "🔁": "\ue8ee", "📁": "\ue8b7", "＋": "\ue710", "✓": "\ue73e",
+          "←": "\ue72b", "▾": "\ue70d", "▼": "\ue70d", "▶": "\ue76c", "◀": "\ue76b", "⟳": "\ue72c",
+          "📌": "\ue718", "—": "\ue921", "✕": "\ue8bb", "⋯": "\ue712"}
+
+
+def icon_parts(text):
+    """把按鈕文字拆成（圖示, 文字, 下拉箭頭）；沒有圖示字型或不是已知符號時，整段當文字。"""
+    if not ICON_GLYPH_FONT:
+        return "", text, ""
+    icon = chevron = ""
+    if text[:1] in GLYPHS and text[1:2] in ("", " "):
+        icon, text = GLYPHS[text[0]], text[2:]
+    if text.endswith(" ▾"):
+        chevron, text = GLYPHS["▾"], text[:-2]
+    return icon, text, chevron
 DEFAULT_SIZE = (380, 620)
 MIN_SIZE = (340, 480)
 CELL_W, CELL_H, HEAD_H = 50, 38, 20
@@ -154,8 +180,9 @@ def apply_fonts(root):
 
     內文（10pt 以下）一律維持正黑體：小字級的中文襯線字筆畫細，在螢幕上不易閱讀。
     """
-    global TITLE_FONT, HEADING_FONT, SUBJECT_FONT
+    global TITLE_FONT, HEADING_FONT, SUBJECT_FONT, ICON_GLYPH_FONT
     installed = set(tkfont.families(root))
+    ICON_GLYPH_FONT = next((name for name in ICON_FAMILIES if name in installed), None)
     serif = next((name for name in SERIF_FAMILIES if name in installed), None)
     if serif:
         TITLE_FONT = (serif, 16, "bold")
@@ -463,6 +490,17 @@ def win_round_corners(widget):
         preference = ctypes.c_int(2)
         dwmapi.DwmSetWindowAttribute(_hwnd(widget), 33, ctypes.byref(preference),
                                      ctypes.sizeof(preference))
+    except (OSError, AttributeError):
+        pass
+
+
+def win_border_color(widget, color):
+    """Windows 11 視窗外框顏色（DWMWA_BORDER_COLOR = 34），改成和奶油底同色系；不支援的系統直接略過。"""
+    try:
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        colorref = ctypes.c_uint(r | g << 8 | b << 16)  # COLORREF 是 0x00BBGGRR
+        ctypes.WinDLL("dwmapi").DwmSetWindowAttribute(_hwnd(widget), 34, ctypes.byref(colorref),
+                                                      ctypes.sizeof(colorref))
     except (OSError, AttributeError):
         pass
 
@@ -971,13 +1009,14 @@ def delete_prompt(task, child_count):
 
 
 def task_subtitle(task, today):
-    """列表卡片的副標題：逾期／時間、週期、清單名稱。"""
+    """列表卡片的副標題：逾期、週期、清單名稱。
+
+    提醒時間顯示在列的右側時間欄（見 App._card），這裡不重複；逾期的時間仍跟著日期寫在副標題。
+    """
     due, at = task["due"], time_text(task.get("time"))
     parts = []
     if due is not None and due < today:
         parts.append(f"已逾期 · {due.month}月{due.day}日{' ' + at if at else ''}")
-    elif at:
-        parts.append(f"⏰ {at}")
     if task.get("recur"):
         parts.append(f"🔁 {format_recur(task['recur'])}")
     parts.append(task["list_title"])
@@ -995,16 +1034,39 @@ def apply_fields(task, fields):
 
 
 def parse_time_text(text):
-    """解析使用者輸入的時間：15:00、1500、9:05、9：05（全形冒號）。無法解析回傳 None。"""
-    match = re.match(r"^\s*(\d{1,2})\s*[:：]?\s*(\d{2})\s*$", text or "")
-    if not match:
-        return None
-    hour, minute = int(match.group(1)), int(match.group(2))
-    return dt.time(hour, minute) if hour < 24 and minute < 60 else None
+    """解析使用者輸入的時間：15:00、1500、9:05、9：05（全形冒號）、11（整點）、上午11點、下午3點半。
+
+    一律照字面的 24 小時制：只寫數字或「11點」都不猜上午／下午，寫了「下午」才加 12 小時。
+    無法解析回傳 None。
+    """
+    text = (text or "").strip().replace(" ", "")
+    match = re.match(r"^(\d{1,2})(?:[:：]?(\d{2}))?$", text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2) or 0)
+        return dt.time(hour, minute) if hour < 24 and minute < 60 else None
+    quick = _QUICK_TIME_RE.match(text)
+    if quick and quick.group("period"):  # 有寫上午／下午才交給快速列的規則換算
+        return _quick_time(text)
+    match = re.match(r"^(\d{1,2})點(?:(半)|(\d{1,2})分?)?$", text)
+    if match:
+        hour, minute = int(match.group(1)), 30 if match.group(2) else int(match.group(3) or 0)
+        return dt.time(hour, minute) if hour < 24 and minute < 60 else None
+    return None
 
 
 def time_text(time_value):
     return f"{time_value:%H:%M}" if time_value else ""
+
+
+def next_up_text(items, now):
+    """大標題下方的摘要：今天還沒到的第一件（行程或有時間的待辦）；沒有就回傳空字串。
+
+    @param items [(dt.time, 標題)]：今天的行程與有時間的待辦
+    @param now 目前時間（dt.datetime）
+    @return 例如「下一件：14:00 準備週會簡報」
+    """
+    upcoming = sorted((at, title) for at, title in items if at >= now.time().replace(second=0, microsecond=0))
+    return f"下一件：{time_text(upcoming[0][0])} {upcoming[0][1]}" if upcoming else ""
 
 
 # ---------------------------------------------------------------- 快速列：一行文字辨識成待辦
@@ -1234,19 +1296,33 @@ def draw_rounded(canvas, w, h, radius, fill, bg, outline=None, line=1, tag="shap
 class Pill(tk.Canvas):
     """膠囊形按鈕（反鋸齒圓角），取代方角的 Label 按鈕。text_value 保留文字，方便測試與重畫。
 
-    style：primary（主要動作，實心強調色）、soft（次要，淡藍底）、outline（白底細框）
+    style：primary（主要動作，實心強調色）、soft（次要，淡色底）、outline（細框）、ghost（無底色，滑過才顯示）
+    文字開頭的符號（📅 ⏰ 🔁 📁 ＋ ✓ ←）與結尾的「 ▾」改畫成單色線條圖示，和文字分開垂直置中。
     """
 
     STYLES = {"primary": (ACCENT, ON_ACCENT, ACCENT_HOVER, None),
               "soft": (ACCENT_SOFT, ACCENT, ACCENT_SOFT_HOVER, None),
-              "outline": (BG, ACCENT, HOVER, BORDER)}
+              "outline": (BG, TEXT, HOVER, BORDER),
+              "ghost": (BG, GRAY, HOVER, None)}
 
     def __init__(self, parent, text, command, style="primary", font=FONT, padx=14, pady=5, bg=None):
         self.fill, self.fg, self.hover_fill, self.outline = self.STYLES[style]
         self.parent_bg = bg or parent.cget("bg")
+        if style == "ghost":
+            self.fill = self.parent_bg
         self.text_value, self.font = text, font
-        measure = tkfont.Font(root=parent._root(), font=font)
-        self.w = measure.measure(text) + 2 * px(padx)
+        self.parts = icon_parts(text)
+        root = parent._root()
+        measure = tkfont.Font(root=root, font=font)
+        size = abs(measure.actual("size"))
+        self.icon_font = (ICON_GLYPH_FONT, max(size - 1, 6))  # 線條圖示佔滿整個字框，略小一級才和中文等高
+        self.chevron_font = (ICON_GLYPH_FONT, max(size - 3, 6))
+        # [(文字, 字型, 寬度)]：圖示、文字、下拉箭頭依序排開，整組水平置中
+        self.pieces = [(t, f, tkfont.Font(root=root, font=f).measure(t))
+                       for t, f in zip(self.parts, (self.icon_font, font, self.chevron_font)) if t]
+        self.gap = px(6)
+        self.content_w = sum(w for _, _, w in self.pieces) + self.gap * (len(self.pieces) - 1)
+        self.w = self.content_w + 2 * px(padx)
         self.h = measure.metrics("linespace") + 2 * px(pady)
         super().__init__(parent, width=self.w, height=self.h, bg=self.parent_bg, highlightthickness=0,
                          cursor="hand2")
@@ -1258,7 +1334,10 @@ class Pill(tk.Canvas):
     def _draw(self, fill):
         draw_rounded(self, self.w, self.h, self.h // 2, fill, self.parent_bg, outline=self.outline)
         self.delete("label")
-        self.create_text(self.w / 2, self.h / 2, text=self.text_value, fill=self.fg, font=self.font, tags="label")
+        x, mid = (self.w - self.content_w) / 2, self.h / 2
+        for text, font, width in self.pieces:
+            self.create_text(x, mid, text=text, fill=self.fg, font=font, anchor="w", tags="label")
+            x += width + self.gap
 
 
 class RoundedBox(tk.Canvas):
@@ -1537,7 +1616,7 @@ class TimePicker(_Popup):
         self.hint.pack(fill="x", pady=(0, px(6)))
         self._link(self.body, "不設時間", lambda: self.pick(None), fg=GRAY).pack(anchor="w")
 
-    HINT = "例如 15:30 或 1530，按 Enter 確定"
+    HINT = "例如 11、15:30、下午3點，按 Enter 確定"
 
     def _pick_custom(self):
         value = parse_time_text(self.custom.get())
@@ -1991,7 +2070,9 @@ class App(tk.Tk):
         self.last_refresh = 0.0
         self.show_undated = False
         self.show_overdue = True
-        self.compact = bool(self.state_data.get("compact_calendar", False))
+        # 預設只顯示這一週，把高度留給今天的清單（比照 Windows 11 工作列月曆、To Do「我的一天」）；
+        # 已經存過設定的使用者沿用原本的選擇
+        self.compact = bool(self.state_data.get("compact_calendar", True))
         self.undo_group = None
         self.undo_job = None
         self.new_due = self.today   # 新增工作的預設日期，跟著月曆選中的日期
@@ -2012,6 +2093,7 @@ class App(tk.Tk):
             self.overrideredirect(True)
         self.after(50, self._apply_win_style)
         self.after(100, self._poll_queue)
+        self.after(NEXT_UP_TICK_MS, self._tick_next_up)
         self.bind("<FocusIn>", self._on_focus)
         self._bind_shortcuts()
         if desktop_reminder:
@@ -2051,6 +2133,7 @@ class App(tk.Tk):
         if self.pin_to_desktop:
             win_pin_to_desktop(self)
         win_round_corners(self)
+        win_border_color(self, BORDER)  # 外框改用暖色系，取代系統預設的灰框
         if not self.show_in_taskbar:
             # 背景模式：工具視窗不在工作列，也沒有「可縮小」樣式，Win + D 不會影響它
             win_set_background_window(self)
@@ -2222,9 +2305,16 @@ class App(tk.Tk):
         return True
 
     def _icon_button(self, parent, text, command, font=ICON_FONT, tip=None):
-        """扁平小按鈕（Label 實作，比 ttk.Button 窄，頂部列才放得下）。"""
-        btn = tk.Label(parent, text=text, bg=BG, fg=GRAY, font=font,
-                       padx=px(6), pady=px(2), cursor="hand2")
+        """扁平小按鈕（Label 實作，比 ttk.Button 窄，頂部列才放得下）。
+
+        單一符號（⟳ 📌 ◀ ▶ …）改用線條圖示字型顯示；text_value 保留原本的符號，供測試辨識。
+        """
+        shown = text
+        if text in GLYPHS and ICON_GLYPH_FONT:
+            shown, font = GLYPHS[text], (ICON_GLYPH_FONT, 10)
+        btn = tk.Label(parent, text=shown, bg=BG, fg=GRAY, font=font,
+                       padx=px(8), pady=px(4), cursor="hand2")
+        btn.text_value = text
         btn.bind("<Button-1>", lambda e: command())
         btn.bind("<Enter>", lambda e: btn.config(bg=HOVER))
         btn.bind("<Leave>", lambda e: btn.config(bg=BG))
@@ -2244,10 +2334,15 @@ class App(tk.Tk):
                                   padx=px(8), cursor="hand2")
         self.btn_login.bind("<Button-1>", lambda e: self.login())
         Tooltip(self.btn_login, "用瀏覽器登入 Google 帳號")
-        self.btn_logout = self._icon_button(tools, "登出", self.logout, font=FONT,
-                                            tip="登出 Google 並撤銷 DayNote 的存取權")
-        self.btn_refresh = self._icon_button(tools, "⟳", self.refresh, tip="立即同步（F5）")
-        self.btn_refresh.pack(side="left")
+        # 同步、登出這類不常用（登出還會撤銷授權）的動作收進「⋯」選單：
+        # 不再緊鄰關閉鈕而誤按，右上角也只剩圖示按鈕，和 Windows 11 標題列一致
+        self.menu_more = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT_SOFT,
+                                 activeforeground=TEXT, bd=0, relief="flat", font=FONT)
+        self.menu_more.add_command(label="立即同步（F5）", command=self.refresh)
+        self.menu_more.add_separator()
+        self.menu_more.add_command(label="登出 Google", command=self.logout)
+        self.btn_more = self._icon_button(tools, "⋯", self._open_more_menu, tip="更多：同步、登出")
+        self.btn_more.pack(side="left")
         self.btn_pin = self._icon_button(
             tools, "📌", self.toggle_topmost,
             tip=lambda: "取消置頂" if self.topmost else "置頂：永遠顯示在其他視窗上面")
@@ -2272,20 +2367,30 @@ class App(tk.Tk):
         # 主畫面（月曆＋清單＋輸入列）；點任務時整塊換成詳細頁，比照手機 App
         self.main_view = tk.Frame(self, bg=BG)
         self.detail_view = tk.Frame(self, bg=BG)
-        nav = tk.Frame(self.main_view, bg=BG)
-        nav.pack(fill="x", padx=px(16), pady=(px(20), px(4)))  # 和標題拉開距離
-        self._icon_button(nav, "◀", lambda: self.shift_month(-1),
-                          tip=lambda: "上一週" if self.compact else "上個月").pack(side="left")
+        # 大標題下方一行「下一件」：常駐桌面時瞥一眼就知道接下來要做什麼，不必往下捲清單
+        # 沒有下一件時整行收起來，不佔高度；由 _update_next_up() 決定顯示與否
+        self.lbl_next = tk.Label(self.main_view, bg=BG, fg=ACCENT, font=FONT, anchor="w")
+        nav = self.nav = tk.Frame(self.main_view, bg=BG)
+        nav.pack(fill="x", padx=px(16), pady=(px(14), px(4)))  # 和標題拉開距離
+        # 左：月份標題＋「展開整月／只看這週」（點標題也能切換）；右：上一個／下一個、今天
+        # 切換鈕寫明文字而不是只放箭頭，第一次用的人一看就知道月曆可以展開
+        self.lbl_month = tk.Label(nav, font=HEADING_FONT, bg=BG, fg=TEXT, cursor="hand2")
+        self.lbl_month.pack(side="left", padx=(px(4), 0))
+        self.lbl_month.bind("<Button-1>", lambda e: self.toggle_compact())
         self.btn_compact = self._icon_button(
-            nav, "", self.toggle_compact, font=FONT,  # 與「今天」同字級
-            tip=lambda: "展開整個月" if self.compact else "收合月曆：只顯示這一週")
-        self.btn_compact.pack(side="right")
-        self._icon_button(nav, "今天", lambda: self.select(dt.date.today()), font=FONT,
-                          tip="回到今天（Home）").pack(side="right")
+            nav, "", self.toggle_compact, font=(UI_FONT, 9),
+            tip=lambda: "展開整個月" if self.compact else "收合月曆：只顯示這一週，清單空間比較大")
+        self.btn_compact.config(fg=ACCENT)
+        self.btn_compact.bind("<Leave>", lambda e: self.btn_compact.config(fg=ACCENT), add="+")
+        self.btn_compact.pack(side="left", padx=(px(4), 0))
+        btn_today = Pill(nav, "今天", lambda: self.select(dt.date.today()), style="soft",
+                         font=(UI_FONT, 9), padx=10, pady=2)
+        btn_today.pack(side="right", padx=(px(4), px(2)))
+        Tooltip(btn_today, "回到今天（Home）")
         self._icon_button(nav, "▶", lambda: self.shift_month(1),
                           tip=lambda: "下一週" if self.compact else "下個月").pack(side="right")
-        self.lbl_month = tk.Label(nav, font=HEADING_FONT, bg=BG, fg=TEXT)
-        self.lbl_month.pack(side="left", expand=True)
+        self._icon_button(nav, "◀", lambda: self.shift_month(-1),
+                          tip=lambda: "上一週" if self.compact else "上個月").pack(side="right")
 
         self.cal = tk.Canvas(self.main_view, width=7 * CELL_W, height=HEAD_H + 6 * CELL_H,
                              bg=BG, highlightthickness=0)
@@ -2354,12 +2459,32 @@ class App(tk.Tk):
             return
         d = self.selected
         self.lbl_date.config(text=f"{d.month}月{d.day}日 星期{WEEKDAY_NAME[d.weekday()]}")
-        self.btn_compact.config(text="展開" if self.compact else "收合")
+        self.btn_compact.config(text="展開整月 ▾" if self.compact else "只看這週 ▴")
         if self.placeholder_on:  # 提示文字跟著選中的日期變動
             self.entry.delete(0, "end")
             self.entry.insert(0, self._placeholder_text())
         self._draw_calendar()
         self._draw_list()
+        self._update_next_up()
+
+    def _update_next_up(self):
+        """更新「下一件」：只在選中今天時顯示，其他日子留空（摘要是給「現在」用的）。"""
+        text = ""
+        if self.g.refresh_token and self.selected == self.today:
+            items = [(parse_time_text(when), title) for when, title in self.events.get(self.today, [])]
+            items += [(t["time"], t["title"]) for t in self.tasks if t["due"] == self.today and t.get("time")]
+            text = next_up_text([(at, title) for at, title in items if at], self._now())
+        self.lbl_next.config(text=text)
+        if text:
+            self.lbl_next.pack(fill="x", padx=px(18), pady=(px(2), 0), before=self.nav)
+        else:
+            self.lbl_next.pack_forget()
+
+    def _tick_next_up(self):
+        """每分鐘更新一次「下一件」，時間過了就換成下一件。"""
+        if not (self.detail or self.draft):
+            self._update_next_up()
+        self.after(NEXT_UP_TICK_MS, self._tick_next_up)
 
     def _draw_calendar(self):
         c = self.cal
@@ -2459,14 +2584,22 @@ class App(tk.Tk):
         for name, day_off in self.holidays.get(day, []):
             tk.Label(self.list_frame, text=f"◆ {name}" + ("（放假）" if day_off else ""),
                      bg=BG, fg=HOLIDAY_RED if day_off else GRAY, font=FONT, anchor="w").pack(fill="x", pady=(0, 2))
-        for when, title in events:
-            self._card(title, "Google 日曆", None, event_time=when)
-        for task in tasks:
-            self._task_with_children(task)
+        # 行程與待辦合成一條時間軸：全天行程 → 有時間的依時間 → 沒時間的待辦（維持 Google Tasks 順序）
+        timeline = [((0, dt.time.min) if when == "全天" else (1, parse_time_text(when) or dt.time.min), (when, title), None)
+                    for when, title in events]
+        timeline += [((1, t["time"]) if t.get("time") else (2, dt.time.min), None, t) for t in tasks]
+        for _, event, task in sorted(timeline, key=lambda item: item[0]):  # sorted 穩定：同時間時行程在前
+            if task:
+                self._task_with_children(task)
+            else:
+                self._card(event[1], "Google 日曆", None, at=event[0])
         for task in previews:
             self._preview_card(task)
         if not events and not tasks and not previews:
-            tk.Label(self.list_frame, text="這天沒有任務", bg=BG, fg=GRAY, font=FONT).pack(pady=8)
+            # 空狀態順便教新增方式：第一次用的人不必翻說明就知道從哪裡開始
+            tk.Label(self.list_frame, text="這天沒有任務", bg=BG, fg=GRAY, font=FONT).pack(pady=(px(14), 0))
+            tk.Label(self.list_frame, text="在下方輸入框打字新增，例如：明天 3點 開會",
+                     bg=BG, fg=GRAY, font=SMALL).pack(pady=(px(2), px(8)))
 
         undated = sorted((t for t in top_level if t["due"] is None), key=self._order_key)
         if undated:
@@ -2522,11 +2655,31 @@ class App(tk.Tk):
         Pill(box, "登入 Google", self.login, style="primary", padx=20).pack()
 
     def _section_header(self, text, expanded, toggle, fg=ACCENT):
-        """可收合區塊的標題列（逾期、未排日期）。"""
-        header = tk.Label(self.list_frame, text=f"{'▼' if expanded else '▶'} {text}",
-                          bg=BG, fg=fg, font=HEADING_FONT, cursor="hand2", anchor="w")
-        header.pack(fill="x", pady=(px(14), px(4)))
-        header.bind("<Button-1>", lambda e: toggle())
+        """可收合區塊的標題列（逾期、未排日期）：左邊標題＋淡色數量，右邊收合箭頭，整列可點。
+
+        text 形如「逾期（1）」；標題 Label 的 text_value 保留「▼ 逾期（1）」，供測試辨識。
+        """
+        full = f"{'▼' if expanded else '▶'} {text}"
+        name, _, count = text.rstrip("）").partition("（")
+        header = tk.Frame(self.list_frame, bg=BG, cursor="hand2")
+        header.pack(fill="x", pady=(px(16), px(4)))
+        title = tk.Label(header, text=name, bg=BG, fg=fg, font=HEADING_FONT, cursor="hand2", anchor="w")
+        title.text_value = full
+        title.pack(side="left")
+        parts = [header, title]
+        if count:
+            badge = tk.Label(header, text=count, bg=BG, fg=GRAY, font=SMALL, cursor="hand2")
+            badge.pack(side="left", padx=(px(6), 0))
+            parts.append(badge)
+        if ICON_GLYPH_FONT:
+            arrow = tk.Label(header, text=GLYPHS["▼" if expanded else "▶"], bg=BG, fg=GRAY,
+                             font=(ICON_GLYPH_FONT, 8), cursor="hand2")
+            arrow.pack(side="right", padx=(0, px(6)))
+            parts.append(arrow)
+        else:
+            title.config(text=full)
+        for widget in parts:
+            widget.bind("<Button-1>", lambda e: toggle())
 
     # ---- 任務階層（比照 Google Tasks：子任務縮排在父任務下方）
 
@@ -2547,16 +2700,18 @@ class App(tk.Tk):
 
     def _task_with_children(self, task):
         overdue = task["due"] is not None and task["due"] < self.today
-        self._card(task["title"], task_subtitle(task, self.today), task, subtitle_fg=RED if overdue else GRAY)
+        # 逾期的時間已和日期一起寫在副標題，右側時間欄就不再重複
+        self._card(task["title"], task_subtitle(task, self.today), task, subtitle_fg=RED if overdue else GRAY,
+                   at="" if overdue else time_text(task.get("time")))
         for child in self._children(task):
-            # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示；有時間才顯示
-            child_at = time_text(child.get("time"))
-            self._card(child["title"], f"⏰ {child_at}" if child_at else "", child, indent=True)
+            # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示；有時間才顯示在右側
+            self._card(child["title"], "", child, indent=True, at=time_text(child.get("time")))
 
-    def _card(self, title, subtitle, task, indent=False, subtitle_fg=GRAY, event_time=None):
+    def _card(self, title, subtitle, task, indent=False, subtitle_fg=GRAY, at=""):
         """清單中的一列（扁平樣式，比照 Google Tasks：無外框，列與列之間以細線分隔）。
 
-        task 為 None 時是日曆行程：左側灰色色條＋粗體時間，只顯示、不可勾選。indent＝子工作縮排。
+        task 為 None 時是日曆行程：左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
+        at＝右側時間欄文字（14:00、全天）；行程與待辦的時間都靠右對齊，掃一眼就能讀出順序。
         """
         row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(44))
         row.pack(fill="x", padx=(CHILD_INDENT if indent else 0, 0))
@@ -2567,10 +2722,14 @@ class App(tk.Tk):
             count = len(self._children(task))
             Tooltip(circle, f"標記為完成（含 {count} 個子工作）" if count else "標記為完成")
         else:
-            icon = tk.Label(inner, text=event_time or "", bg=BG, fg=GRAY, font=EVENT_TIME_FONT,
-                            width=5, anchor="w")
-            icon.pack(side="left", padx=(px(4), px(6)))
-            Tooltip(icon, "Google 日曆行程（唯讀，請到日曆 App 修改）")
+            # 行程沒有完成圓圈；留同寬的空位，標題才會和待辦對齊
+            spacer = tk.Frame(inner, bg=BG, width=px(22), height=px(22))
+            spacer.pack(side="left", padx=(0, px(10)))
+            Tooltip(row, "Google 日曆行程（唯讀，請到日曆 App 修改）")
+        lbl_at = None
+        if at:  # 時間欄先 pack，標題太長時被壓縮的是標題而不是時間
+            lbl_at = tk.Label(inner, text=at, bg=BG, fg=GRAY, font=EVENT_TIME_FONT, anchor="e")
+            lbl_at.pack(side="right", anchor="n", padx=(px(8), px(4)), pady=(px(2), 0))
         text = tk.Frame(inner, bg=BG)
         text.pack(side="left", fill="x", expand=True)
         lbl_title = tk.Label(text, text=title, bg=BG, fg=TEXT, font=FONT, anchor="w", justify="left")
@@ -2582,7 +2741,7 @@ class App(tk.Tk):
             tk.Label(text, text=subtitle, bg=BG, fg=subtitle_fg, font=SMALL, anchor="w").pack(fill="x")
         window = row.create_window(px(4), px(6), window=inner, anchor="nw")
         if task:  # 點整列（圓圈以外）開啟詳細頁
-            for widget in (row, inner, text, *text.winfo_children()):
+            for widget in (row, inner, text, *text.winfo_children(), *([lbl_at] if lbl_at else [])):
                 widget.bind("<Button-1>", lambda e: self.open_detail(task))
                 widget.config(cursor="hand2")
         # 滑鼠移過整列時淡淡變色，提示可以點
@@ -2595,7 +2754,7 @@ class App(tk.Tk):
             width = row.winfo_width()
             if width < px(50):
                 return
-            lbl_title.config(wraplength=width - px(60))
+            lbl_title.config(wraplength=width - px(60) - (lbl_at.winfo_reqwidth() + px(12) if lbl_at else 0))
             row.itemconfigure(window, width=width - px(8))
             inner.update_idletasks()
             height = inner.winfo_reqheight() + px(12)
@@ -2701,7 +2860,9 @@ class App(tk.Tk):
 
         bar = tk.Frame(view, bg=BG)
         bar.pack(fill="x", pady=(px(6), px(4)), **pad)
-        self._icon_button(bar, "← 返回", self.cancel_new_task, font=FONT, tip="不建立，返回（Esc）").pack(side="left")
+        btn_back = Pill(bar, "← 返回", self.cancel_new_task, style="ghost", padx=8, pady=3)
+        btn_back.pack(side="left")
+        Tooltip(btn_back, "不建立，返回（Esc）")
 
         row_list = tk.Frame(view, bg=BG)
         row_list.pack(fill="x", **pad)
@@ -2892,15 +3053,17 @@ class App(tk.Tk):
         task = self.detail["task"]
         pad = {"padx": px(18)}
 
+        # 清單名稱與刪除放同一列：刪除平常是灰色圖示，滑過才轉紅，避免搶走注意力
         bar = tk.Frame(view, bg=BG)
-        bar.pack(fill="x", pady=(px(6), px(4)), **pad)
+        bar.pack(fill="x", pady=(px(8), 0), **pad)
         btn_delete = self._icon_button(bar, "刪除", self.delete_detail, font=FONT, tip="刪除這筆工作")
-        btn_delete.config(fg=RED)
-        btn_delete.bind("<Leave>", lambda e: btn_delete.config(fg=RED), add="+")
+        if ICON_GLYPH_FONT:
+            btn_delete.config(text="", font=(ICON_GLYPH_FONT, 11))
+        btn_delete.bind("<Enter>", lambda e: btn_delete.config(fg=RED), add="+")
+        btn_delete.bind("<Leave>", lambda e: btn_delete.config(fg=GRAY), add="+")
         btn_delete.pack(side="right")
-
-        tk.Label(view, text=f"清單：{task['list_title']}", bg=BG, fg=GRAY, font=SMALL,
-                 anchor="w").pack(fill="x", **pad)
+        tk.Label(bar, text=f"清單：{task['list_title']}", bg=BG, fg=GRAY, font=SMALL,
+                 anchor="w").pack(side="left", fill="x")
         self.detail_title = self._rounded_field(
             view, lambda parent: tk.Entry(parent, font=SUBJECT_FONT, relief="flat",
                                           bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),
@@ -3222,7 +3385,12 @@ class App(tk.Tk):
             self.snoozed.pop(key, None)
             changed = True
             if now - when > dt.timedelta(hours=REMINDER_MAX_LATE_H) and fire_at == when:
+                log.info("Reminder skipped (too late): task=%s scheduled=%s now=%s",
+                         task["id"], when.isoformat(), now.isoformat(timespec="seconds"))
                 continue  # 錯過太久（例如關機好幾天）就不補跳
+            log.info("Reminder fired: task=%s scheduled=%s fire_at=%s now=%s",
+                     task["id"], when.isoformat(), fire_at.isoformat(timespec="seconds"),
+                     now.isoformat(timespec="seconds"))
             ReminderToast(self, task, when,
                           on_done=lambda t=task: self.complete(t),
                           on_snooze=lambda k=key: self._snooze(k))
@@ -3300,13 +3468,18 @@ class App(tk.Tk):
         self.refresh()
 
     def _show_login_button(self, show):
-        """未登入顯示「登入」，已登入顯示「登出」，兩者在同一個位置切換。"""
+        """未登入時在「⋯」左邊顯示「登入」；登入後收起來，選單裡的「登出 Google」才可用。"""
         if show:
-            self.btn_logout.pack_forget()
-            self.btn_login.pack(side="left", padx=(0, 4), before=self.btn_refresh)
+            self.btn_login.pack(side="left", padx=(0, 4), before=self.btn_more)
         else:
             self.btn_login.pack_forget()
-            self.btn_logout.pack(side="left", before=self.btn_refresh)
+        self.menu_more.entryconfig("登出 Google", state="disabled" if show else "normal")
+
+    def _open_more_menu(self):
+        """在「⋯」按鈕正下方展開選單，右緣對齊按鈕。"""
+        x = self.btn_more.winfo_rootx() + self.btn_more.winfo_width() - self.menu_more.winfo_reqwidth()
+        y = self.btn_more.winfo_rooty() + self.btn_more.winfo_height() + px(4)
+        self.menu_more.tk_popup(max(x, 0), y)
 
     def logout(self):
         if self.busy or not self.g.refresh_token:
@@ -3406,10 +3579,25 @@ class App(tk.Tk):
             self._save_reminder_state()
         self._show_login_button(False)
         self._select_remembered_list()
-        self._set_status(f"已同步 {dt.datetime.now():%H:%M}")
+        self.synced_text = f"已同步 {dt.datetime.now():%H:%M}"
+        self._set_status(self.synced_text)
+        self._show_first_run_tip()
         self.redraw()
         if view != self.view:  # 讀取期間使用者切換了月份
             self.refresh()
+
+    def _show_first_run_tip(self):
+        """第一次同步成功後，在狀態列提示隱藏的快捷鍵（只提示一次），過一段時間換回同步時間。"""
+        if self.state_data.get("tips_shown"):
+            return
+        self.state_data["tips_shown"] = True
+        save_state(self.state_data)
+        self._set_status(FIRST_RUN_TIP)
+
+        def restore():
+            if self.status.cget("text") == FIRST_RUN_TIP:  # 期間沒有其他訊息蓋過才換回
+                self._set_status(self.synced_text)
+        self.after(FIRST_RUN_TIP_MS, restore)
 
     def complete(self, task):
         """標記完成；比照 Google Tasks App，完成父任務時子任務一併完成。
@@ -3764,9 +3952,22 @@ def run_setup_wizard():
     return result["cfg"]
 
 
+def setup_logging():
+    """提醒紀錄寫進 data 資料夾的 daynote.log（滿 256 KB 換檔，保留 1 份舊檔）；寫不了就不記，不影響程式。"""
+    try:
+        handler = logging.handlers.RotatingFileHandler(LOG_PATH, maxBytes=256 * 1024, backupCount=1,
+                                                       encoding="utf-8")
+    except OSError:
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
 def main():
     enable_dpi_awareness()
     migrate_legacy_files()
+    setup_logging()
     try:
         try:
             cfg = load_config()

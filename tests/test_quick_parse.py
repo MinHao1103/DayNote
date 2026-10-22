@@ -262,3 +262,61 @@ class QuickRecurAndListTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PickerTimeTest(unittest.TestCase):
+    """提醒時間選擇器（parse_time_text）：照字面 24 小時制，不猜上午／下午。"""
+
+    def test_accepted_formats(self):
+        """數字、冒號、整點、中文寫法 > 換算成正確時間"""
+        cases = {"15:30": T(15, 30), "1530": T(15, 30), "9：05": T(9, 5), "930": T(9, 30),
+                 "11": T(11, 0), "11點": T(11, 0), "11點半": T(11, 30), "11點15分": T(11, 15),
+                 "上午11點": T(11, 0), "下午3點": T(15, 0), "晚上9點半": T(21, 30), " 11 : 00 ": T(11, 0)}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                # Given: 使用者在選擇器輸入的文字
+                # When: 解析
+                result = daynote.parse_time_text(text)
+                # Then: 時間正確
+                self.assertEqual(result, expected)
+
+    def test_bare_hour_not_shifted(self):
+        """沒寫上午／下午的 3點 > 照寫 03:00，不像快速列一樣改成下午"""
+        # Given: 選擇器輸入「3點」
+        # When: 解析
+        result = daynote.parse_time_text("3點")
+        # Then: 03:00
+        self.assertEqual(result, T(3, 0))
+
+    def test_rejected(self):
+        """超出範圍或看不懂 > None"""
+        for text in ("24", "11:60", "25點", "abc", "", "下午"):
+            with self.subTest(text=text):
+                # Given: 無效輸入
+                # When: 解析
+                result = daynote.parse_time_text(text)
+                # Then: 無法解析
+                self.assertIsNone(result)
+
+
+class NextUpTest(unittest.TestCase):
+    """大標題下方的「下一件」摘要（next_up_text）。"""
+
+    def test_first_upcoming(self):
+        """已過與未到的項目混在一起 > 只取現在之後最早的一件"""
+        # Given: 09:00 已過、14:00 與 15:00 未到（現在 14:00 整點算未到）
+        items = [(T(15, 0), "週會"), (T(9, 0), "晨會"), (T(14, 0), "準備簡報")]
+        # When: 產生摘要
+        result = daynote.next_up_text(items, NOW)
+        # Then: 14:00 準備簡報
+        self.assertEqual(result, "下一件：14:00 準備簡報")
+
+    def test_nothing_left(self):
+        """全部都過了或沒有項目 > 空字串"""
+        for items in ([], [(T(9, 0), "晨會")]):
+            with self.subTest(items=items):
+                # Given: 沒有未到的項目
+                # When: 產生摘要
+                result = daynote.next_up_text(items, NOW)
+                # Then: 空
+                self.assertEqual(result, "")

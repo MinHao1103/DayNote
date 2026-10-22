@@ -13,6 +13,7 @@ OAuth 瀏覽器登入、真實同步、釘在桌面與 Win + D、全域快捷鍵
 開機自動啟動捷徑、雙擊 .bat／.vbs 啟動
 """
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -150,7 +151,8 @@ def _shown_text(w):
     if isinstance(w, daynote.Pill):
         return w.text_value
     if isinstance(w, tk.Label):
-        return w.cget("text")
+        # 改用圖示字型顯示的按鈕，text_value 保留原本的符號文字
+        return getattr(w, "text_value", None) or w.cget("text")
     return None
 
 
@@ -284,6 +286,7 @@ class AppTestCase(unittest.TestCase):
             unittest.mock.patch.object(daynote, "win_pin_to_desktop", lambda w: None),
             unittest.mock.patch.object(daynote, "win_is_pinned", lambda w: True),
             unittest.mock.patch.object(daynote, "win_round_corners", lambda w: None),
+            unittest.mock.patch.object(daynote, "win_border_color", lambda w, c: None),
             unittest.mock.patch.object(daynote, "win_set_background_window", lambda w: None),
             unittest.mock.patch.object(daynote, "win_hook_messages", lambda w, **kw: object()),
             unittest.mock.patch.object(daynote, "win_register_hotkey",
@@ -301,6 +304,8 @@ class AppTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.today = dt.date.today()
         self.g = StoreGoogle()
+        self.first_run = False  # True：不預寫 state.json，模擬第一次使用（會顯示快捷鍵提示）
+        self.compact_calendar = False  # 既有案例以整月月曆撰寫
 
     def _dialog(self, name):
         def record(title, message, **kw):
@@ -311,11 +316,17 @@ class AppTestCase(unittest.TestCase):
     def start(self, **kw):
         """啟動 App 並等第一次同步完成。"""
         hook = {}
+        if not self.first_run:
+            with open(os.path.join(self.tmp, "state.json"), "w", encoding="utf-8") as f:
+                json.dump({"tips_shown": True, "compact_calendar": self.compact_calendar}, f)
         with unittest.mock.patch.object(daynote, "win_hook_messages",
                                         lambda w, **k: hook.update(k) or object()):
             self.app = daynote.App(self.g, holiday_calendar=kw.pop("holiday_calendar", HOLIDAY_CAL),
                                    desktop_reminder=False, **kw)
             pump(self.app, 0.4)  # 背景模式的視窗樣式與快捷鍵在 200ms 後才設定
+            deadline = time.time() + 3.0  # 電腦忙碌時 200ms 的排程會延後，等到快捷鍵註冊完成再繼續
+            while "on_hotkey" not in hook and time.time() < deadline:
+                pump(self.app, 0.05)
         self.hotkey_callback = hook.get("on_hotkey")  # Windows 收到 WM_HOTKEY 時會呼叫的函式
         self.app.clipboard_clear = lambda: None   # 不動使用者的剪貼簿
         self.app.clipboard_append = lambda text: setattr(self, "clipboard", text)
@@ -366,7 +377,8 @@ class StartupTest(AppTestCase):
         self.assertEqual(app.current_list()["title"], "工作")
         self.assertEqual([lst["title"] for lst in app.lists], ["工作", "個人"])
         self.assertTrue(self.status().startswith("已同步"))
-        self.assertTrue(app.btn_logout.winfo_ismapped())
+        self.assertFalse(app.btn_login.winfo_ismapped())
+        self.assertEqual(app.menu_more.entrycget("登出 Google", "state"), "normal")
 
     def test_hotkeys_registered_on_startup(self):
         """背景模式啟動 > 註冊 F8 與 Ctrl + Alt + D 兩組快捷鍵"""
@@ -408,25 +420,26 @@ class StartupTest(AppTestCase):
         # When: 按「登入 Google」
         click(find_label(app.list_frame, "登入 Google"))
         settle(app)
-        # Then: 已同步、顯示任務、改顯示登出
+        # Then: 已同步、顯示任務、收起登入按鈕、選單的登出可用
         self.assertEqual(self.clipboard, "https://accounts.example.com/<LOGIN_URL>")
         self.assertIn("晨會", self.list_texts())
-        self.assertTrue(app.btn_logout.winfo_ismapped())
         self.assertFalse(app.btn_login.winfo_ismapped())
+        self.assertEqual(app.menu_more.entrycget("登出 Google", "state"), "normal")
 
     def test_logout(self):
-        """登出並確認 > 撤銷授權、清空畫面、改顯示登入"""
+        """「⋯」選單選登出並確認 > 撤銷授權、清空畫面、改顯示登入"""
         # Given: 已登入且有任務
         self.g.seed("晨會", self.today)
         app = self.start()
-        # When: 按登出並確認
-        click(app.btn_logout)
+        # When: 選單選登出並確認
+        app.menu_more.invoke("登出 Google")
         settle(app)
         # Then: 已登出
         self.assertIn("revoke", self.g.calls)
         self.assertEqual(self.status(), "已登出")
         self.assertIn("尚未登入 Google", self.list_texts())
         self.assertTrue(app.btn_login.winfo_ismapped())
+        self.assertEqual(app.menu_more.entrycget("登出 Google", "state"), "disabled")
 
     def test_logout_cancelled(self):
         """登出時按否 > 不撤銷，畫面不變"""
@@ -434,8 +447,8 @@ class StartupTest(AppTestCase):
         self.g.seed("晨會", self.today)
         app = self.start()
         self.answer["askyesno"] = False
-        # When: 按登出但取消
-        click(app.btn_logout)
+        # When: 選單選登出但取消
+        app.menu_more.invoke("登出 Google")
         pump(app, 0.2)
         # Then: 仍登入
         self.assertNotIn("revoke", self.g.calls)
@@ -459,14 +472,14 @@ class StartupTest(AppTestCase):
         self.g.refresh_token = None
         self.g.fail.add("tasklists")
         self.g.fail_with["tasklists"] = daynote.NeedLogin
-        # When: 按 ⟳ 同步
-        click(app.btn_refresh)
+        # When: 選單選同步
+        app.menu_more.invoke("立即同步（F5）")
         settle(app)
         # Then: 引導重新登入
         self.assertEqual(self.status(), "tasklists failed")
         self.assertIn("尚未登入 Google", self.list_texts())
         self.assertTrue(app.btn_login.winfo_ismapped())
-        self.assertFalse(app.btn_logout.winfo_ismapped())
+        self.assertEqual(app.menu_more.entrycget("登出 Google", "state"), "disabled")
 
 
 # ---------------------------------------------------------------- 新增工作
@@ -800,7 +813,7 @@ class NewTaskPageTest(AppTestCase):
         self.assertFalse(any(re_time(t) for t in shown), shown)
         self.assertIn("不設時間", shown)
         self.assertIsInstance(app.focus_get(), tk.Entry)
-        self.assertEqual(find_label(picker, "例如 15:30 或 1530，按 Enter 確定").cget("fg"), daynote.GRAY)
+        self.assertEqual(find_label(picker, "例如 11、15:30、下午3點，按 Enter 確定").cget("fg"), daynote.GRAY)
 
     def test_time_picker_invalid_input(self):
         """時間欄位輸入看不懂的內容 > 同一行改紅字，不套用"""
@@ -811,7 +824,7 @@ class NewTaskPageTest(AppTestCase):
         # When: 無效時間
         type_time(app, "25:00")
         # Then: 紅字、未設定
-        hint = find_label(popup(app), "看不懂這個時間。例如 15:30 或 1530，按 Enter 確定")
+        hint = find_label(popup(app), "看不懂這個時間。例如 11、15:30、下午3點，按 Enter 確定")
         self.assertEqual(hint.cget("fg"), daynote.RED)
         self.assertIsNone(app.draft["time"])
 
@@ -1141,18 +1154,35 @@ class CalendarTest(AppTestCase):
         self.assertEqual(app.view, start_view)
 
     def test_compact_calendar(self):
-        """按「收合」 > 月曆只剩一週，◀ ▶ 改為切換週，設定會記住"""
-        # Given: 已啟動
+        """按「只看這週」 > 月曆只剩一週，◀ ▶ 改為切換週，設定會記住"""
+        # Given: 已啟動（整月）
         app = self.start()
+        self.assertEqual(app.btn_compact.cget("text"), "只看這週 ▴")
         # When: 收合後按 ▶
         click(app.btn_compact)
         # Then: 只有一週
         self.assertEqual(len(app.weeks), 1)
-        self.assertEqual(app.btn_compact.cget("text"), "展開")
+        self.assertEqual(app.btn_compact.cget("text"), "展開整月 ▾")
         self.assertTrue(app.state_data["compact_calendar"])
         click(find_label(app.main_view, "▶"))
         settle(app)
         self.assertEqual(app.selected, self.today + dt.timedelta(days=7))
+
+    def test_first_run_defaults_to_week(self):
+        """第一次使用 > 月曆預設只顯示這一週；點月份標題 > 展開整月並記住"""
+        # Given: 沒有任何設定
+        self.first_run = True
+        # When: 啟動
+        app = self.start()
+        # Then: 只有這一週，按鈕寫著可以展開
+        self.assertEqual(len(app.weeks), 1)
+        self.assertIn(self.today, app.weeks[0])
+        self.assertEqual(app.btn_compact.cget("text"), "展開整月 ▾")
+        # When: 點月份標題
+        click(app.lbl_month)
+        # Then: 整月，並記住
+        self.assertGreaterEqual(len(app.weeks), 4)
+        self.assertFalse(app.state_data["compact_calendar"])
 
     def test_keyboard_navigation(self):
         """方向鍵與 Home > 前後一天、前後一週、回到今天"""
@@ -1222,6 +1252,77 @@ class CalendarTest(AppTestCase):
         # Then: 早上 → 晚上 → 沒時間
         shown = [t for t in self.list_texts() if t in ("沒時間", "晚上", "早上")]
         self.assertEqual(shown, ["早上", "晚上", "沒時間"])
+
+    def test_events_and_tasks_share_one_timeline(self):
+        """行程與有時間的待辦 > 合成一條時間軸依時間排列，時間顯示在右側欄，副標題不重複"""
+        # Given: 15:00 的行程、14:00 與 16:00 的待辦、一筆沒時間
+        day = self.today.isoformat()
+        self.g.events_by_cal["primary"].append(
+            {"summary": "週會", "start": {"dateTime": f"{day}T15:00:00"}, "end": {"dateTime": f"{day}T16:00:00"}})
+        self.g.seed("準備簡報", self.today, notes="⏰ 14:00")
+        self.g.seed("回信", self.today, notes="⏰ 16:00")
+        self.g.seed("沒時間", self.today)
+        # When: 啟動
+        self.start()
+        # Then: 14:00 準備簡報 → 15:00 週會 → 16:00 回信 → 沒時間；時間欄獨立顯示
+        shown = self.list_texts()
+        order = [t for t in shown if t in ("準備簡報", "週會", "回信", "沒時間")]
+        self.assertEqual(order, ["準備簡報", "週會", "回信", "沒時間"])
+        self.assertEqual([t for t in shown if t in ("14:00", "15:00", "16:00")], ["14:00", "15:00", "16:00"])
+        self.assertNotIn("⏰ 14:00 · 工作", shown)
+        self.assertIn("工作", shown)
+
+    def test_next_up_shows_upcoming_item(self):
+        """今天還有未到的待辦 > 大標題下方顯示「下一件」；切到別天 > 收起"""
+        # Given: 今天 23:59 的待辦（測試執行時一定還沒到）
+        self.g.seed("收尾", self.today, notes="⏰ 23:59")
+        # When: 啟動
+        app = self.start()
+        # Then: 顯示下一件
+        self.assertEqual(app.lbl_next.cget("text"), "下一件：23:59 收尾")
+        self.assertTrue(app.lbl_next.winfo_ismapped())
+        # When: 切到明天
+        app.select(self.today + dt.timedelta(days=1))
+        settle(app)
+        # Then: 收起
+        self.assertFalse(app.lbl_next.winfo_ismapped())
+
+    def test_empty_day_teaches_quick_add(self):
+        """選中沒有任務的一天 > 顯示「這天沒有任務」與新增方式的提示"""
+        # Given: 沒有任何任務
+        # When: 啟動
+        self.start()
+        # Then: 空狀態附帶提示
+        shown = self.list_texts()
+        self.assertIn("這天沒有任務", shown)
+        self.assertIn("在下方輸入框打字新增，例如：明天 3點 開會", shown)
+
+    def test_first_run_tip_shown_once(self):
+        """第一次同步成功 > 狀態列提示快捷鍵並記錄；再同步 > 不再提示"""
+        # Given: 第一次使用（沒有 state.json）
+        self.first_run = True
+        self.g.seed("寫週報", self.today)
+        # When: 啟動
+        app = self.start()
+        # Then: 狀態列是提示，且已記錄
+        self.assertEqual(self.status(), daynote.FIRST_RUN_TIP)
+        with open(os.path.join(self.tmp, "state.json"), encoding="utf-8") as f:
+            self.assertTrue(json.load(f)["tips_shown"])
+        # When: 再同步一次
+        app.refresh()
+        settle(app)
+        # Then: 換回同步時間
+        self.assertTrue(self.status().startswith("已同步"))
+
+    def test_next_up_hidden_without_timed_items(self):
+        """今天只有沒時間的待辦 > 不顯示「下一件」，不佔高度"""
+        # Given: 沒時間的待辦
+        self.g.seed("寫週報", self.today)
+        # When: 啟動
+        app = self.start()
+        # Then: 收起
+        self.assertEqual(app.lbl_next.cget("text"), "")
+        self.assertFalse(app.lbl_next.winfo_ismapped())
 
 
 # ---------------------------------------------------------------- 重複待辦的預定日子
@@ -1325,6 +1426,19 @@ class ReminderTest(AppTestCase):
         app._check_reminders()
         # Then: 只有一個提醒，顯示標題
         self.assertIn("開會", texts(self.toast().win))
+
+    def test_reminder_logged(self):
+        """提醒跳出 > 記錄預定時間與實際觸發時間，方便追查提醒時間不對"""
+        # Given: 一分鐘前該提醒的任務
+        task_id = self.seed_due_now()
+        app = self.start()
+        # When: 檢查提醒
+        with self.assertLogs("daynote", "INFO") as logs:
+            app._check_reminders()
+        # Then: 紀錄含任務 id 與預定時間
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn(f"task={task_id}", logs.output[0])
+        self.assertIn("scheduled=", logs.output[0])
 
     def test_reminder_done(self):
         """提醒視窗按「✓ 完成」 > 任務完成"""

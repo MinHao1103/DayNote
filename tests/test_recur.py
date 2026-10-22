@@ -1189,9 +1189,9 @@ class LoadAndDisplayTest(unittest.TestCase):
         today = D(2026, 10, 5)
         cases = [
             ("一般", make_task(), "工作"),
-            ("有時間", make_task(time=T(9, 0)), "⏰ 09:00 · 工作"),
+            ("有時間（時間改顯示在右側欄）", make_task(time=T(9, 0)), "工作"),
             ("有週期", make_task(recur=parse("每週一")), "🔁 每週一 · 工作"),
-            ("時間加週期", make_task(time=T(9, 0), recur=parse("每天")), "⏰ 09:00 · 🔁 每天 · 工作"),
+            ("時間加週期", make_task(time=T(9, 0), recur=parse("每天")), "🔁 每天 · 工作"),
             ("逾期", make_task(due=D(2026, 10, 1), time=T(9, 0)), "已逾期 · 10月1日 09:00 · 工作"),
             ("逾期加週期", make_task(due=D(2026, 10, 1), recur=parse("每天")), "已逾期 · 10月1日 · 🔁 每天 · 工作"),
         ]
