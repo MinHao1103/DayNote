@@ -299,6 +299,29 @@ class PickerTimeTest(unittest.TestCase):
                 self.assertIsNone(result)
 
 
+class IsLateTest(unittest.TestCase):
+    """今天的待辦時間已過（is_late）：主清單與快速列以紅色標示。"""
+
+    def test_cases(self):
+        """依日期與時間判斷是否已過"""
+        cases = [
+            ("今天、時間已過", {"due": TODAY, "time": T(13, 0)}, True),
+            ("今天、同一分鐘不算過", {"due": TODAY, "time": T(14, 0)}, False),
+            ("今天、還沒到", {"due": TODAY, "time": T(15, 0)}, False),
+            ("今天、沒有時間", {"due": TODAY, "time": None}, False),
+            ("明天", {"due": TODAY + dt.timedelta(days=1), "time": T(9, 0)}, False),
+            ("昨天（由逾期處理）", {"due": TODAY - dt.timedelta(days=1), "time": T(9, 0)}, False),
+        ]
+        for name, task, expected in cases:
+            with self.subTest(name=name):
+                # Given: 不同日期與時間的待辦，現在 14:00:30
+                now = NOW.replace(second=30)
+                # When: 判斷
+                result = daynote.is_late(task, now)
+                # Then: 結果正確
+                self.assertEqual(result, expected)
+
+
 class NextUpTest(unittest.TestCase):
     """大標題下方的「下一件」摘要（next_up_text）。"""
 

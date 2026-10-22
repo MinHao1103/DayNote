@@ -1288,6 +1288,40 @@ class CalendarTest(AppTestCase):
         self.assertNotIn("⏰ 14:00 · 工作", shown)
         self.assertIn("工作", shown)
 
+    def test_late_task_time_is_red(self):
+        """今天時間已過還沒做的待辦 > 右側時間改紅色；還沒到的維持灰色"""
+        if dt.datetime.now().time() < dt.time(0, 1) or dt.datetime.now().time() >= dt.time(23, 59):
+            self.skipTest("午夜交界無法同時建立「已過」與「未到」的時間")
+        # Given: 00:00（已過）與 23:59（未到）各一筆
+        self.g.seed("早就該做", self.today, notes="⏰ 00:00")
+        self.g.seed("晚點再做", self.today, notes="⏰ 23:59")
+        # When: 啟動
+        app = self.start()
+        # Then: 已過的紅色、未到的灰色
+        self.assertEqual(find_label(app.list_frame, "00:00").cget("fg"), daynote.RED)
+        self.assertEqual(find_label(app.list_frame, "23:59").cget("fg"), daynote.GRAY)
+
+    def test_scrollbar_hidden_when_list_fits(self):
+        """清單沒超出 > 不畫捲軸；超出 > 畫出捲軸"""
+        # Given: 只有一筆任務
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        app.update()
+        # Then: 不需要捲軸
+        self.assertFalse(app.list_scrollbar.is_needed())
+        self.assertEqual(app.list_scrollbar.find_all(), ())
+        # When: 加到 30 筆後重新同步
+        for i in range(30):
+            self.g.seed(f"工作 {i}", self.today)
+        app.refresh()
+        settle(app)
+        app.update()
+        # Then: 畫出捲軸，且在預設視窗寬度下看得到（沒被清單擠掉）
+        self.assertTrue(app.list_scrollbar.is_needed())
+        self.assertNotEqual(app.list_scrollbar.find_all(), ())
+        self.assertGreater(app.list_scrollbar.winfo_width(), 1)
+        self.assertTrue(app.list_scrollbar.winfo_ismapped())
+
     def test_next_up_shows_upcoming_item(self):
         """今天還有未到的待辦 > 大標題下方顯示「下一件」；切到別天 > 收起"""
         # Given: 今天 23:59 的待辦（測試執行時一定還沒到）

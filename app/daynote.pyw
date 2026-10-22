@@ -1069,6 +1069,17 @@ def time_text(time_value):
     return f"{time_value:%H:%M}" if time_value else ""
 
 
+def is_late(task, now):
+    """今天的待辦、提醒時間已過但還沒完成時回傳 True（以分鐘為單位，同一分鐘內不算過）。
+
+    @param task 任務（due、time）
+    @param now 目前時間（dt.datetime）
+    @return 是否已過時間
+    """
+    at = task.get("time")
+    return task["due"] == now.date() and at is not None and at < now.time().replace(second=0, microsecond=0)
+
+
 def next_up_text(items, now):
     """大標題下方的摘要：今天還沒到的第一件（行程或有時間的待辦）；沒有就回傳空字串。
 
@@ -1349,6 +1360,67 @@ class Pill(tk.Canvas):
         for text, font, width in self.pieces:
             self.create_text(x, mid, text=text, fill=self.fg, font=font, anchor="w", tags="label")
             x += width + self.gap
+
+
+class ThinScrollbar(tk.Canvas):
+    """細捲軸：取代 Windows 預設的灰色捲軸，用畫面配色畫成圓角細條；內容沒超出時不顯示。
+
+    介面比照 ttk.Scrollbar：command 接 canvas.yview，set(first, last) 由 yscrollcommand 呼叫。
+    """
+
+    WIDTH = 6
+
+    def __init__(self, parent, command, bg=BG):
+        super().__init__(parent, width=px(self.WIDTH), bg=bg, highlightthickness=0)
+        self.command, self.bg = command, bg
+        self.first, self.last = 0.0, 1.0
+        self.color = BORDER
+        self._drag = None
+        self.bind("<Configure>", lambda e: self._draw())
+        self.bind("<Enter>", lambda e: self._paint(GRAY))
+        self.bind("<Leave>", lambda e: self._paint(BORDER))
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._move)
+        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
+
+    def set(self, first, last):
+        self.first, self.last = float(first), float(last)
+        self._draw()
+
+    def is_needed(self):
+        """內容超出可視範圍時才需要捲軸。"""
+        return self.first > 0.0 or self.last < 1.0
+
+    def _paint(self, color):
+        self.color = color
+        self._draw()
+
+    def _thumb(self):
+        height = self.winfo_height()
+        top = round(self.first * height)
+        return top, max(round(self.last * height), top + px(24))  # 至少 24px，太短不好拖
+
+    def _draw(self):
+        self.delete("all")
+        if not self.is_needed():
+            return
+        top, bottom = self._thumb()
+        w = px(self.WIDTH)
+        draw_rounded(self, w, bottom - top, w // 2, self.color, self.bg, tag="thumb", y0=top)
+
+    def _press(self, event):
+        if not self.is_needed():
+            return
+        top, bottom = self._thumb()
+        if top <= event.y <= bottom:
+            self._drag = (event.y, self.first)
+        else:  # 點在軌道上：往該方向翻一頁
+            self.command("scroll", -1 if event.y < top else 1, "pages")
+
+    def _move(self, event):
+        if self._drag:
+            start_y, start_first = self._drag
+            self.command("moveto", start_first + (event.y - start_y) / max(self.winfo_height(), 1))
 
 
 class RoundedBox(tk.Canvas):
@@ -1938,7 +2010,7 @@ class QuickBar:
         if due is not None and due < today:
             return f"已逾期 {due.month}/{due.day}", RED
         if due == today:
-            return at, ACCENT
+            return at, RED if is_late(task, dt.datetime.now()) else ACCENT  # 時間過了還沒做：和逾期同色
         return (f"{date_text(due, short=True)} {at}".strip(), GRAY)
 
     # ---- 操作
@@ -2455,15 +2527,16 @@ class App(tk.Tk):
         wrap = self.list_wrap = tk.Frame(self.main_view, bg=BG)
         wrap.pack(fill="both", expand=True, padx=(px(18), px(12)))
         self.list_canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(wrap, orient="vertical", command=self.list_canvas.yview)
+        scrollbar = self.list_scrollbar = ThinScrollbar(wrap, command=self.list_canvas.yview)
         self.list_frame = tk.Frame(self.list_canvas, bg=BG)
         window = self.list_canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
         self.list_frame.bind("<Configure>", lambda e: self.list_canvas.configure(
             scrollregion=self.list_canvas.bbox("all")))
         self.list_canvas.bind("<Configure>", lambda e: self.list_canvas.itemconfigure(window, width=e.width))
         self.list_canvas.configure(yscrollcommand=scrollbar.set)
+        # 捲軸先 pack：Canvas 預設會要求約 378px 寬，後 pack 的捲軸在預設視窗寬度下會被擠到看不見
+        scrollbar.pack(side="right", fill="y", padx=(px(4), 0))
         self.list_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
         self.bind_all("<MouseWheel>", lambda e: self.list_canvas.yview_scroll(-e.delta // 120, "units"))
         self.main_view.pack(fill="both", expand=True)  # 最後 pack，狀態列才不會被擠掉
 
@@ -2714,14 +2787,16 @@ class App(tk.Tk):
 
     def _task_with_children(self, task):
         overdue = task["due"] is not None and task["due"] < self.today
-        # 逾期的時間已和日期一起寫在副標題，右側時間欄就不再重複
+        # 逾期的時間已和日期一起寫在副標題，右側時間欄就不再重複；今天時間已過還沒做的，時間改紅色
+        now = self._now()
         self._card(task["title"], task_subtitle(task, self.today), task, subtitle_fg=RED if overdue else GRAY,
-                   at="" if overdue else time_text(task.get("time")))
+                   at="" if overdue else time_text(task.get("time")), at_fg=RED if is_late(task, now) else GRAY)
         for child in self._children(task):
             # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示；有時間才顯示在右側
-            self._card(child["title"], "", child, indent=True, at=time_text(child.get("time")))
+            self._card(child["title"], "", child, indent=True, at=time_text(child.get("time")),
+                       at_fg=RED if is_late(child, now) else GRAY)
 
-    def _card(self, title, subtitle, task, indent=False, subtitle_fg=GRAY, at=""):
+    def _card(self, title, subtitle, task, indent=False, subtitle_fg=GRAY, at="", at_fg=GRAY):
         """清單中的一列（扁平樣式，比照 Google Tasks：無外框，列與列之間以細線分隔）。
 
         task 為 None 時是日曆行程：左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
@@ -2742,7 +2817,7 @@ class App(tk.Tk):
             Tooltip(row, "Google 日曆行程（唯讀，請到日曆 App 修改）")
         lbl_at = None
         if at:  # 時間欄先 pack，標題太長時被壓縮的是標題而不是時間
-            lbl_at = tk.Label(inner, text=at, bg=BG, fg=GRAY, font=EVENT_TIME_FONT, anchor="e")
+            lbl_at = tk.Label(inner, text=at, bg=BG, fg=at_fg, font=EVENT_TIME_FONT, anchor="e")
             lbl_at.pack(side="right", anchor="n", padx=(px(8), px(4)), pady=(px(2), 0))
         text = tk.Frame(inner, bg=BG)
         text.pack(side="left", fill="x", expand=True)

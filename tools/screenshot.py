@@ -147,6 +147,7 @@ def main():
     parser = argparse.ArgumentParser(description="產生 DayNote 畫面截圖（使用假資料）")
     parser.add_argument("--page", choices=PAGES, default="main")
     parser.add_argument("--out", default=DEFAULT_OUT)
+    parser.add_argument("--width", type=int, help="視窗寬度（100%% 縮放的像素）；預設維持 DayNote 預設大小")
     args = parser.parse_args()
 
     daynote.enable_dpi_awareness()  # 和正式啟動一樣，座標才是實際像素
@@ -175,6 +176,9 @@ def main():
     app.attributes("-topmost", True)
     pump(app, 0.4)
     settle(app)
+    if args.width:
+        app.geometry(f"{daynote.px(args.width)}x{app.winfo_height()}")
+        pump(app, 0.3)
     target = open_page(app, g, args.page, today)
     pump(app, 0.8)  # 等視窗與 DWM 圓角、陰影畫完
     target.update_idletasks()
