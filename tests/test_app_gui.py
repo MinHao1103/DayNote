@@ -1305,6 +1305,25 @@ class CalendarTest(AppTestCase):
         self.assertEqual(self.g.tasks[task_id]["due"], f"{tomorrow.isoformat()}T00:00:00.000Z")
         self.assertEqual(self.status(), "已把「寫週報」移到明天")
 
+    def test_reschedule_undo(self):
+        """改日期後按「復原」 > 日期、提醒、重複全部還原"""
+        # Given: 今天 15:00、每天重複，選了「不排日期」
+        task_id = self.g.seed("量血壓", self.today, notes="⏰ 15:00\n🔁 每天\n記在本子上")
+        app = self.start()
+        task = next(t for t in app.tasks if t["id"] == task_id)
+        app._build_task_menu(task).invoke("不排日期")
+        settle(app)
+        self.assertTrue(app.btn_undo.winfo_ismapped())
+        # When: 按復原
+        click(app.btn_undo)
+        settle(app)
+        # Then: Google 與畫面都還原
+        self.assertEqual(self.g.tasks[task_id]["due"], f"{self.today.isoformat()}T00:00:00.000Z")
+        self.assertEqual(self.g.tasks[task_id]["notes"], "⏰ 15:00\n🔁 每天\n記在本子上")
+        self.assertIn("量血壓", self.list_texts())
+        self.assertEqual(self.status(), "已復原")
+        self.assertFalse(app.btn_undo.winfo_ismapped())
+
     def test_right_click_menu_disables_current_day(self):
         """今天的待辦 > 右鍵選單的「移到今天」不能按"""
         # Given: 今天一筆任務

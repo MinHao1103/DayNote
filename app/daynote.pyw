@@ -1044,6 +1044,18 @@ def apply_fields(task, fields):
         task["due"] = task_due({"due": fields["due"]})
 
 
+def restore_fields(before, fields):
+    """把 fields 改過的欄位，依修改前的任務 before 組回 API 欄位（復原用）。"""
+    restored = {}
+    if "due" in fields:
+        restored["due"] = due_field(before["due"])
+    if "notes" in fields:
+        restored["notes"] = join_meta(before.get("time"), before.get("recur"), before.get("notes", ""))
+    if "title" in fields:
+        restored["title"] = before["title"]
+    return restored
+
+
 def parse_time_text(text):
     """解析使用者輸入的時間：15:00、1500、9:05、9：05（全形冒號）、11（整點）、上午11點、下午3點半。
 
@@ -2108,6 +2120,11 @@ def ask_text(parent, title, prompt, ok_text="建立"):
     return result["value"]
 
 
+def due_field(day):
+    """Tasks API 的 due 欄位值：只有日期有意義，固定送當天 00:00 UTC；None 表示不排日期。"""
+    return f"{day.isoformat()}T00:00:00.000Z" if day else None
+
+
 def date_text(day, short=False):
     """日期的簡短顯示：今天／明天／無日期／10/8（四）；short=True 時省略星期（空間有限的輸入列用）。"""
     if day is None:
@@ -2162,6 +2179,7 @@ class App(tk.Tk):
         self.compact = bool(self.state_data.get("compact_calendar", True))
         self.undo_group = None
         self.undo_job = None
+        self.undo_action = None     # 其他可復原的動作（例如改日期）：按「復原」時呼叫
         self.new_due = self.today   # 新增工作的預設日期，跟著月曆選中的日期
         self.list_index = -1        # 新增工作預設放進的清單（self.lists 的索引；-1＝尚未讀到清單）
         self.draft = None           # 新增頁（點「詳細」）編輯中的內容
@@ -2493,7 +2511,7 @@ class App(tk.Tk):
         grip.bind("<B1-Motion>", self._on_resize)
         self.btn_undo = tk.Label(status_row, text="復原", bg=BG, fg=ACCENT, cursor="hand2",
                                  font=(SMALL[0], SMALL[1], "bold underline"))
-        self.btn_undo.bind("<Button-1>", lambda e: self.undo_complete())
+        self.btn_undo.bind("<Button-1>", lambda e: self.undo())
         self.status = tk.Label(status_row, bg=BG, fg=GRAY, font=SMALL, anchor="w", justify="left")
         self.status.pack(side="left", fill="x", expand=True, pady=(0, px(6)))
         # 狀態文字依視窗寬度換行
@@ -3292,7 +3310,7 @@ class App(tk.Tk):
             fields["notes"] = join_meta(self.detail["time"], self.detail.get("recur"), notes)
         if self.detail["due"] != task["due"]:
             due = self.detail["due"]
-            fields["due"] = f"{due.isoformat()}T00:00:00.000Z" if due else None
+            fields["due"] = due_field(due)
         return fields
 
     def close_detail(self, save=True):
@@ -3741,33 +3759,61 @@ class App(tk.Tk):
         for task in tasks:
             if task not in self.tasks or task["due"] == day:
                 continue
-            fields = {"due": f"{day.isoformat()}T00:00:00.000Z" if day else None}
+            fields = {"due": due_field(day)}
             if day is None and (task.get("time") or task.get("recur")):
                 fields["notes"] = join_meta(None, None, task.get("notes", ""))
-            changes.append((task, dict(task), fields))
+            changes.append((task, fields))
         if not changes:
             return
-        for task, _, fields in changes:
-            apply_fields(task, fields)
-        self.redraw()
         where = date_text(day)
         done_text = (f"已把「{changes[0][0]['title']}」移到{where}" if len(changes) == 1
                      else f"已把 {len(changes)} 件移到{where}")
+        self._send_task_changes(changes, done_text, undoable=True)
+
+    def _send_task_changes(self, changes, done_text, undoable):
+        """送出一組任務修改 [(任務, API 欄位)]：先更新畫面，背景送出；失敗就還原並顯示錯誤。
+
+        undoable 時，成功後在狀態列提供「復原」，按下會把每筆改回修改前的欄位（反向再送一次）。
+        """
+        befores = [dict(task) for task, _ in changes]
+        for task, fields in changes:
+            apply_fields(task, fields)
+        self.redraw()
         self._set_status("儲存中…")
 
         def work():
-            for task, _, fields in changes:
+            for task, fields in changes:
                 self.g.update_task(task["list_id"], task["id"], fields)
 
         def done(_, err):
             if err:
-                for task, before, _ in changes:
+                for (task, _), before in zip(changes, befores):
                     task.update(before)  # 還原畫面，下次同步以 Google 上的資料為準
                 self.redraw()
                 self._show_error(err)
+            elif undoable:
+                reverse = [(task, restore_fields(before, fields)) for (task, fields), before in zip(changes, befores)]
+                self._offer_undo_action(done_text, lambda: self._send_task_changes(
+                    [(t, f) for t, f in reverse if t in self.tasks], "已復原", undoable=False))
             else:
                 self._set_status(done_text)
         self.run_bg(work, done)
+
+    def _offer_undo_action(self, text, action):
+        """狀態列顯示 text 與「復原」，UNDO_SECONDS 秒內按「復原」會執行 action。"""
+        self._set_status(text)
+        self.undo_action = action
+        self.btn_undo.pack(side="right", padx=px(4), before=self.status)
+        self.undo_job = self.after(UNDO_SECONDS * 1000, self._hide_undo)
+
+    def undo(self):
+        """狀態列「復原」：有其他動作就復原它，否則復原剛完成的待辦。"""
+        action = self.undo_action
+        if action:
+            self._hide_undo()
+            action()
+        else:
+            self.undo_complete()
 
     def complete(self, task):
         """標記完成；比照 Google Tasks App，完成父任務時子任務一併完成。
@@ -3879,6 +3925,7 @@ class App(tk.Tk):
             self.undo_job = None
         self.undo_group = None
         self.undo_spawned = None
+        self.undo_action = None
         self.btn_undo.pack_forget()
 
     def undo_complete(self):
