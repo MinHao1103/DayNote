@@ -160,9 +160,9 @@ THEMES = {
         "HOLIDAY_RED": "#b8402a", "HOLIDAY_RED_FADED": "#e6c2b8", "FESTIVAL": "#d9a441", "GRAY": "#6b6257"}},
     "night": {"name": "墨夜（深色）", "fonts": {"serif": True, "title": 22, "heading": 12}, "colors": {
         "BG": "#17191e", "BORDER": "#2f323a", "TEXT": "#ece6da", "EVENT_DOT": "#7fa88f", "PREVIEW_DOT": "#7a5d3a",
-        "CARD_BG": "#22252c", "FADED_TEXT": "#55585f", "ON_ACCENT": "#17191e", "SELECTED": "#3a3122",
+        "CARD_BG": "#22252c", "FADED_TEXT": "#55585f", "ON_ACCENT": "#17191e", "SELECTED": "#4a3a20",
         "DIVIDER": "#24272e", "HOVER": "#20232a", "CARD": "#22252c", "CARD_HOVER": "#2b2f37", "ACCENT": "#e8a33d",
-        "ACCENT_HOVER": "#f0b55a", "ACCENT_SOFT": "#3a3122", "ACCENT_SOFT_HOVER": "#4a3d29", "RED": "#ef7a6b",
+        "ACCENT_HOVER": "#f0b55a", "ACCENT_SOFT": "#4a3a20", "ACCENT_SOFT_HOVER": "#4f4229", "RED": "#ef7a6b",
         "HOLIDAY_RED": "#e58a7e", "HOLIDAY_RED_FADED": "#6b4a47", "FESTIVAL": "#e8a33d", "GRAY": "#9c968b"}},
     "nordic": {"name": "北歐極簡", "fonts": {"serif": False, "title": 22, "heading": 12}, "colors": {
         "BG": "#f3f4f1", "BORDER": "#d9ddd6", "TEXT": "#1c2420", "EVENT_DOT": "#8fb3a0", "PREVIEW_DOT": "#b9d0c1",
@@ -2388,7 +2388,8 @@ class QuickBar:
             self.parsed = parse_quick(self.text.get(), app.lists, today, dt.datetime.now())
             self.chips.config(text=self._chips_text(self.parsed), fg=ACCENT)
             self.items = []
-            self.header.config(text="按 Enter 新增" if self.parsed["title"] else "還沒有標題，請輸入工作內容")
+            # 底部快捷鍵說明已寫「Enter 新增」，有標題時不再重複；只在缺標題時提醒
+            self.header.config(text="" if self.parsed["title"] else "還沒有標題，請輸入工作內容")
         else:
             self.parsed = None
             self.chips.config(text=self.EXAMPLE, fg=GRAY)
@@ -2407,6 +2408,10 @@ class QuickBar:
                 left = len(self.items) - overdue
                 self.header.config(text=(f"今天還有 {left} 件" + (f" · 逾期 {overdue} 件" if overdue else ""))
                                    if self.items else "今天的待辦都完成了")
+        if self.header.cget("text"):  # 沒有內容的標題列收起來，不留空白行
+            self.header.pack(fill="x", before=self.rows)
+        else:
+            self.header.pack_forget()
         self.items = self.items[:self.MAX_ROWS]
         self.selected = min(self.selected, max(len(self.items) - 1, 0))
         self._render_rows(today)
@@ -3086,11 +3091,19 @@ class App(tk.Tk):
         # 「下一件」放在大日期右邊當第三行：瞥一眼就知道接下來要做什麼，又不多佔一整列高度
         # 沒有下一件時收起來；由 _update_next_up() 決定顯示與否
         self.lbl_next = tk.Label(meta, bg=BG, fg=ACCENT, font=SMALL, anchor="w")
-        # 新增頁、詳細頁：一般的頁面標題
-        self.lbl_date = tk.Label(top, font=TITLE_FONT, bg=BG, fg=TEXT, anchor="w")
+        # 新增頁、詳細頁：左邊返回箭頭＋頁面標題，返回放在標題同一列（一般 App 的位置）
+        self.page_row = tk.Frame(top, bg=BG)
+        self.btn_detail_back = self._icon_button(
+            self.page_row, "←", self._page_back,
+            tip=lambda: "不建立，返回（Esc）" if self.draft else "返回；有修改會自動儲存（Esc）")
+        if ICON_GLYPH_FONT:
+            self.btn_detail_back.config(font=(ICON_GLYPH_FONT, 13))
+        self.btn_detail_back.pack(side="left", padx=(0, px(4)))
+        self.lbl_date = tk.Label(self.page_row, font=TITLE_FONT, bg=BG, fg=TEXT, anchor="w")
+        self.lbl_date.pack(side="left", fill="x", expand=True)
         self.hero.pack(fill="x")
         # 頂部（含日期文字）當拖曳區
-        for widget in (top, tools_row, self.lbl_date, self.hero, self.lbl_day, meta,
+        for widget in (top, tools_row, self.page_row, self.lbl_date, self.hero, self.lbl_day, meta,
                        self.lbl_weekday, self.lbl_relative):
             widget.bind("<Button-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._on_drag)
@@ -3204,18 +3217,33 @@ class App(tk.Tk):
 
     def _show_date_hero(self, day):
         """主畫面標題：大日期數字＋星期＋相對日期。"""
-        self.lbl_date.pack_forget()
+        self.page_row.pack_forget()
         self.lbl_date.config(text=f"{day.month}月{day.day}日 星期{WEEKDAY_NAME[day.weekday()]}")
         self.lbl_day.config(text=str(day.day))
         self.lbl_weekday.config(text=f"星期{WEEKDAY_NAME[day.weekday()]}")
-        self.lbl_relative.config(text=f"{relative_day_text(day, self.today)} · {day.month} 月")
+        # 月份已顯示在下方月曆標題，這裡只寫相對日期，避免同一個資訊重複出現
+        self.lbl_relative.config(text=relative_day_text(day, self.today))
         self.hero.pack(fill="x")
 
     def _show_page_title(self, text):
         """新增頁、詳細頁的標題（取代大日期）。"""
         self.hero.pack_forget()
         self.lbl_date.config(text=text)
-        self.lbl_date.pack(fill="x")
+        self.page_row.pack(fill="x")
+
+    def _page_back(self):
+        """頁面標題左邊的返回箭頭：新增頁放棄新增，詳細頁儲存後返回。"""
+        if self.draft:
+            self.cancel_new_task()
+        elif self.detail:
+            self.close_detail()
+
+    def _prop_row(self, view, label, pad, top=0):
+        """屬性列（清單、日期、重複）：左邊固定寬度的灰色標籤，右邊放膠囊按鈕或文字，各列對齊。"""
+        row = tk.Frame(view, bg=BG)
+        row.pack(fill="x", pady=(top, 0), **pad)
+        tk.Label(row, text=label, bg=BG, fg=GRAY, font=SMALL, width=4, anchor="w").pack(side="left")
+        return row
 
     def _update_next_up(self):
         """更新「下一件」：只在選中今天時顯示，其他日子留空（摘要是給「現在」用的）。"""
@@ -3422,7 +3450,7 @@ class App(tk.Tk):
         cursor = "hand2" if toggle else ""
         name, _, count = text.rstrip("）").partition("（")
         header = tk.Frame(self.list_frame, bg=BG, cursor=cursor)
-        header.pack(fill="x", pady=(px(16), px(4)))
+        header.pack(fill="x", pady=(px(12), px(4)))
         title = tk.Label(header, text=name, bg=BG, fg=fg, font=HEADING_FONT, cursor=cursor, anchor="w")
         title.text_value = full
         title.pack(side="left")
@@ -3471,18 +3499,24 @@ class App(tk.Tk):
         overdue = task["due"] is not None and task["due"] < self.today
         # 逾期的時間已和日期一起寫在副標題，右側時間欄就不再重複；今天時間已過還沒做的，時間改紅色
         now = self._now()
+        children = self._children(task)
+        # 父工作和子工作之間只留細縫，最後一個子工作才恢復一般間距，一眼看出是同一組
+        tight = px(2)
         self._card(task["title"], task_subtitle(task, self.today), task, subtitle_fg=RED if overdue else GRAY,
-                   at="" if overdue else time_text(task.get("time")), at_fg=RED if is_late(task, now) else GRAY)
-        for child in self._children(task):
+                   at="" if overdue else time_text(task.get("time")), at_fg=RED if is_late(task, now) else GRAY,
+                   gap=tight if children else None)
+        for index, child in enumerate(children):
             # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示；有時間才顯示在右側
             self._card(child["title"], "", child, indent=True, at=time_text(child.get("time")),
-                       at_fg=RED if is_late(child, now) else GRAY)
+                       at_fg=RED if is_late(child, now) else GRAY,
+                       gap=tight if index < len(children) - 1 else None)
 
-    def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None):
+    def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None, gap=None):
         """清單中的一筆：圓角卡片浮在底色上，卡片之間留空隙（取代分隔線）；滑過時卡片變色。
 
         task 為 None 時是日曆行程：卡片左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
         at＝右側時間欄文字（14:00、全天）；行程與待辦的時間都靠右對齊，掃一眼就能讀出順序。
+        gap＝和下一張卡片的空隙；父工作與子工作之間縮小空隙，看起來是同一組。
         """
         subtitle_fg, at_fg = subtitle_fg or GRAY, at_fg or GRAY
         row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(50))
@@ -3512,7 +3546,8 @@ class App(tk.Tk):
             tk.Label(text, text=preview, bg=CARD, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
         if subtitle:
             tk.Label(text, text=subtitle, bg=CARD, fg=subtitle_fg, font=SMALL, anchor="w").pack(fill="x")
-        pad_x, pad_y, gap = px(12), px(8), px(6)  # 卡片內距；gap＝卡片之間的空隙（不畫卡片）
+        pad_x, pad_y = px(12), px(6)  # 卡片內距
+        gap = px(5) if gap is None else gap  # 卡片之間的空隙（不畫卡片）
         window = row.create_window(pad_x, pad_y, window=inner, anchor="nw")
         if task:  # 點整列（圓圈以外）開啟詳細頁；按右鍵開快速選單（改日期、完成）
             for widget in (row, inner, text, *text.winfo_children(), *([lbl_at] if lbl_at else [])):
@@ -3646,57 +3681,46 @@ class App(tk.Tk):
             w.destroy()
         pad = {"padx": px(18)}
 
-        bar = tk.Frame(view, bg=BG)
-        bar.pack(fill="x", pady=(px(6), px(4)), **pad)
-        btn_back = Pill(bar, "← 返回", self.cancel_new_task, style="ghost", padx=8, pady=3)
-        btn_back.pack(side="left")
-        Tooltip(btn_back, "不建立，返回（Esc）")
-
-        row_list = tk.Frame(view, bg=BG)
-        row_list.pack(fill="x", **pad)
-        tk.Label(row_list, text="清單", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
-        current = self.lists[draft["list_index"]].get("title", "")
-        self.draft_list = Pill(row_list, f"📁 {current} ▾", lambda: self._open_draft_list_menu(self.draft_list),
-                               style="soft", padx=10, pady=3)
-        self.draft_list.pack(side="left", padx=px(8))
-        Tooltip(self.draft_list, "要放進哪個清單；也可以新增清單")
-
-        # 欄位標籤一律放在輸入框上方，和「詳細資訊」一致
+        # 版面：文字欄位（標題、詳細資訊）標籤在上方；屬性（清單、日期、重複）左標籤對齊成一組
         tk.Label(view, text="標題（必填）", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(
             fill="x", pady=(px(8), 0), **pad)
         self.draft_title = self._rounded_field(
             view, lambda parent: tk.Entry(parent, font=SUBJECT_FONT, relief="flat",
                                           bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),
-            pady=(px(2), px(8)), **pad)
+            pady=(px(2), px(10)), **pad)
         self.draft_title.insert(0, draft["title_draft"])
 
-        tk.Label(view, text="詳細資訊", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", **pad)
-        self.draft_notes = self._rounded_field(
-            view, lambda parent: tk.Text(parent, height=5, wrap="word", font=FONT, relief="flat", bg=CARD_BG,
-                                         fg=TEXT, insertbackground=TEXT, highlightthickness=0),
-            pady=(px(2), px(8)), **pad)
-        self.draft_notes.insert("1.0", draft["notes_draft"])
+        row_list = self._prop_row(view, "清單", pad)
+        current = self.lists[draft["list_index"]].get("title", "")
+        self.draft_list = Pill(row_list, f"📁 {current} ▾", lambda: self._open_draft_list_menu(self.draft_list),
+                               style="soft", padx=10, pady=3)
+        self.draft_list.pack(side="left")
+        Tooltip(self.draft_list, "要放進哪個清單；也可以新增清單")
 
-        row = tk.Frame(view, bg=BG)
-        row.pack(fill="x", **pad)
-        tk.Label(row, text="日期", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
+        row = self._prop_row(view, "日期", pad, top=px(6))
         btn_due = Pill(row, f"📅 {date_text(draft['due'])} ▾",
                        lambda: DatePicker(self, btn_due, draft["due"], self._set_draft_due), style="soft", padx=10, pady=3)
-        btn_due.pack(side="left", padx=px(8))
+        btn_due.pack(side="left", padx=(0, px(6)))
         at = time_text(draft["time"])
         btn_time = Pill(row, f"⏰ {at} ▾" if at else "⏰ 加提醒時間 ▾",
                         lambda: TimePicker(self, btn_time, draft["time"], self._set_draft_time),
                         style="soft", padx=10, pady=3)
         btn_time.pack(side="left")
-        row_recur = tk.Frame(view, bg=BG)
-        row_recur.pack(fill="x", pady=(px(6), 0), **pad)
-        tk.Label(row_recur, text="重複", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
+        row_recur = self._prop_row(view, "重複", pad, top=px(6))
         rule = draft["recur"]
         btn_recur = Pill(row_recur, f"🔁 {format_recur(rule)} ▾" if rule else "🔁 不重複 ▾",
                          lambda: RecurPicker(self, btn_recur, draft["recur"], draft["due"] or dt.date.today(),
                                              self._set_draft_recur),
                          style="soft", padx=10, pady=3)
-        btn_recur.pack(side="left", padx=px(8))
+        btn_recur.pack(side="left")
+
+        tk.Label(view, text="詳細資訊", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(
+            fill="x", pady=(px(12), 0), **pad)
+        self.draft_notes = self._rounded_field(
+            view, lambda parent: tk.Text(parent, height=5, wrap="word", font=FONT, relief="flat", bg=CARD_BG,
+                                         fg=TEXT, insertbackground=TEXT, highlightthickness=0),
+            pady=(px(2), 0), **pad)
+        self.draft_notes.insert("1.0", draft["notes_draft"])
         tk.Label(view, text="子工作：建立後點這筆工作就能新增", bg=BG, fg=GRAY, font=SMALL,
                  anchor="w").pack(fill="x", pady=(px(10), 0), **pad)
 
@@ -3844,56 +3868,43 @@ class App(tk.Tk):
         task = self.detail["task"]
         pad = {"padx": px(18)}
 
-        # 上方列：左邊「← 返回」（和新增頁同位置，修改會自動儲存）；右邊刪除，平常是灰色圖示，滑過才轉紅
-        bar = tk.Frame(view, bg=BG)
-        bar.pack(fill="x", pady=(px(6), px(2)), **pad)
-        btn_back = Pill(bar, "← 返回", self.close_detail, style="ghost", padx=8, pady=3)
-        btn_back.pack(side="left")
-        Tooltip(btn_back, "返回；有修改會自動儲存（Esc）")
-        self.btn_detail_back = btn_back
-        btn_delete = self._icon_button(bar, "刪除", self.delete_detail, font=FONT, tip="刪除這筆工作")
-        if ICON_GLYPH_FONT:
-            btn_delete.config(text="", font=(ICON_GLYPH_FONT, 11))
-        btn_delete.bind("<Enter>", lambda e: btn_delete.config(fg=RED), add="+")
-        btn_delete.bind("<Leave>", lambda e: btn_delete.config(fg=GRAY), add="+")
-        btn_delete.pack(side="right")
-        tk.Label(view, text=f"清單：{task['list_title']}", bg=BG, fg=GRAY, font=SMALL,
-                 anchor="w").pack(fill="x", **pad)
+        # 版面和新增頁一致：標題 → 屬性（清單、日期、重複）→ 詳細資訊 → 子工作；返回箭頭在頁面標題左邊
+        tk.Label(view, text="標題", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(px(8), 0), **pad)
         self.detail_title = self._rounded_field(
             view, lambda parent: tk.Entry(parent, font=SUBJECT_FONT, relief="flat",
                                           bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),
-            pady=(px(4), px(8)), **pad)
+            pady=(px(2), px(10)), **pad)
         self.detail_title.insert(0, self.detail.get("title_draft", task["title"]))
 
-        tk.Label(view, text="詳細資訊", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", **pad)
-        self.detail_notes = self._rounded_field(
-            view, lambda parent: tk.Text(parent, height=5, wrap="word", font=FONT, relief="flat", bg=CARD_BG,
-                                         fg=TEXT, insertbackground=TEXT, highlightthickness=0),
-            pady=(px(2), px(8)), **pad)
-        self.detail_notes.insert("1.0", self.detail.get("notes_draft", task.get("notes", "")))
-
-        row = tk.Frame(view, bg=BG)
-        row.pack(fill="x", **pad)
-        tk.Label(row, text="日期", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
+        # 既有工作不能換清單（Google Tasks 沒有跨清單移動），用一般文字顯示，不做成像按鈕的樣子
+        row_list = self._prop_row(view, "清單", pad)
+        tk.Label(row_list, text=task["list_title"], bg=BG, fg=TEXT, font=FONT, anchor="w").pack(side="left")
+        row = self._prop_row(view, "日期", pad, top=px(6))
         btn_due = Pill(row, f"📅 {date_text(self.detail['due'])} ▾",
                        lambda: DatePicker(self, btn_due, self.detail["due"], self._set_detail_due),
                        style="soft", padx=10, pady=3)
-        btn_due.pack(side="left", padx=px(8))
+        btn_due.pack(side="left", padx=(0, px(6)))
         at = time_text(self.detail["time"])
         btn_time = Pill(row, f"⏰ {at} ▾" if at else "⏰ 加提醒時間 ▾",
                         lambda: TimePicker(self, btn_time, self.detail["time"], self._set_detail_time),
                         style="soft", padx=10, pady=3)
         btn_time.pack(side="left")
         if not task.get("parent"):  # 子工作不支援週期
-            row_recur = tk.Frame(view, bg=BG)
-            row_recur.pack(fill="x", pady=(px(6), 0), **pad)
-            tk.Label(row_recur, text="重複", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
+            row_recur = self._prop_row(view, "重複", pad, top=px(6))
             rule = self.detail["recur"]
             btn_recur = Pill(row_recur, f"🔁 {format_recur(rule)} ▾" if rule else "🔁 不重複 ▾",
                              lambda: RecurPicker(self, btn_recur, self.detail["recur"],
                                                  self.detail["due"] or dt.date.today(), self._set_detail_recur),
                              style="soft", padx=10, pady=3)
-            btn_recur.pack(side="left", padx=px(8))
+            btn_recur.pack(side="left")
+
+        tk.Label(view, text="詳細資訊", bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(
+            fill="x", pady=(px(12), 0), **pad)
+        self.detail_notes = self._rounded_field(
+            view, lambda parent: tk.Text(parent, height=5, wrap="word", font=FONT, relief="flat", bg=CARD_BG,
+                                         fg=TEXT, insertbackground=TEXT, highlightthickness=0),
+            pady=(px(2), 0), **pad)
+        self.detail_notes.insert("1.0", self.detail.get("notes_draft", task.get("notes", "")))
         if task.get("parent"):
             tk.Label(view, text="（這是子工作，在主畫面會顯示在父工作下方）", bg=BG, fg=GRAY, font=SMALL,
                      anchor="w").pack(fill="x", pady=(px(4), 0), **pad)
@@ -3902,6 +3913,13 @@ class App(tk.Tk):
 
         foot = tk.Frame(view, bg=BG)
         foot.pack(side="bottom", fill="x", pady=px(8), **pad)
+        # 刪除放在左下角、和完成／儲存分開，避免誤按；平常是灰色圖示，滑過才轉紅
+        btn_delete = self._icon_button(foot, "刪除", self.delete_detail, font=FONT, tip="刪除這筆工作")
+        if ICON_GLYPH_FONT:
+            btn_delete.config(text="", font=(ICON_GLYPH_FONT, 11))
+        btn_delete.bind("<Enter>", lambda e: btn_delete.config(fg=RED), add="+")
+        btn_delete.bind("<Leave>", lambda e: btn_delete.config(fg=GRAY), add="+")
+        btn_delete.pack(side="left")
         Pill(foot, "✓ 標示為完成", self.complete_detail, style="primary").pack(side="right")
         save = Pill(foot, "儲存", self.close_detail, style="outline")
         save.pack(side="right", padx=(0, px(6)))

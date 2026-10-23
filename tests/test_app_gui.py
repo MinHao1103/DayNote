@@ -1438,7 +1438,7 @@ class CalendarTest(AppTestCase):
         app = self.start()
         # Then: 大日期
         self.assertEqual(app.lbl_day.cget("text"), str(self.today.day))
-        self.assertEqual(app.lbl_relative.cget("text"), f"今天 · {self.today.month} 月")
+        self.assertEqual(app.lbl_relative.cget("text"), "今天")
         self.assertTrue(app.hero.winfo_ismapped())
         # When: 打開新增頁
         app.open_new_task()
@@ -1995,9 +1995,9 @@ class QuickBarTest(AppTestCase):
         bar = self.open_bar()
         # When: 打字
         self.type_in(bar, "明天下午3點 跟客戶開會 每週二 #個人")
-        # Then: 標籤
+        # Then: 顯示辨識標籤，底部已有 Enter 說明，不再多一行「按 Enter 新增」
         self.assertEqual(bar.chips.cget("text"), "📅 明天　⏰ 15:00　🔁 每週二　📁 個人")
-        self.assertIn("按 Enter 新增", texts(bar.win))
+        self.assertFalse(bar.header.winfo_ismapped())
 
     def test_bar_shrinks_when_typing(self):
         """清單模式切到輸入模式 > 視窗高度跟著縮小，不留下空白"""
