@@ -104,15 +104,6 @@ REMINDER_SNOOZE_MIN = 10
 REMINDER_SNOOZE_MORE_MIN = (30, 60)    # 延後下拉選單的其他選項（分鐘）
 REMINDER_TOMORROW_AT = dt.time(9, 0)   # 延後下拉選單「明天早上」的時間
 REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
-MEETING_REMIND_DEFAULT_MIN = 5   # 日曆行程預設在開始前幾分鐘提醒（0＝不提醒）；「⋯」→「會議提醒」可改
-MEETING_REMIND_OPTIONS = (0, 1, 5, 10, 15)
-WRAPUP_DEFAULT = "18:00"         # 每日收尾提醒的預設時間；「⋯」→「每日收尾」可改或關閉（空字串＝不提醒）
-WRAPUP_OPTIONS = ("", "17:00", "17:30", "18:00", "18:30", "19:00")
-WRAPUP_WINDOW_H = 3              # 收尾時間過後 3 小時內打開 DayNote 仍會補跳；更晚就不跳（已經下班了）
-MEETING_LATE_MIN = 10            # 行程開始超過 10 分鐘（例如剛開機）就不補跳，免得會都開完了才提醒
-# 只認這些視訊會議網址（https），從行程的地點、說明裡找「加入會議」連結
-MEETING_URL_RE = re.compile(r"https://(?:[\w-]+\.)*(?:teams\.microsoft\.com|teams\.live\.com|meet\.google\.com"
-                            r"|zoom\.us|webex\.com)/[^\s<>\"')]+")
 NEXT_UP_TICK_MS = 60 * 1000      # 「下一件」摘要每分鐘更新
 FIRST_RUN_TIP = "小技巧：在待辦上按右鍵可以改日期；Ctrl + Alt + D 隨時快速新增"  # 第一次同步成功後在狀態列提示一次
 FIRST_RUN_TIP_MS = 15 * 1000
@@ -133,7 +124,6 @@ HELP_TIPS = (
     "輸入框可以一次寫完：明天 3點 開會 每週二 #工作",
     "點圓圈完成待辦，5 秒內可以按「復原」",
     "在待辦上按右鍵：移到今天、明天或不排日期",
-    "行程開始前 5 分鐘會提醒，可一鍵加入視訊會議",
     "滑鼠停在月曆日期上，看當天有幾件待辦、幾個行程",
     "按月份旁的「展開整月」看整個月",
     "右上角月亮／太陽切換深色、淺色；「⋯」→「風格」有更多配色",
@@ -921,12 +911,6 @@ class Google:
             "showCompleted": "true", "showHidden": "true", "maxResults": 100,
             "completedMin": since.astimezone().isoformat()})
 
-    def completed_between(self, list_id, start, end):
-        """[start, end)（本機時間）之間完成的任務，含隱藏（手機上清除的已完成任務）；供週報使用。"""
-        return self._paged(f"{TASKS_API}/lists/{_q(list_id)}/tasks", {
-            "showCompleted": "true", "showHidden": "true", "maxResults": 100,
-            "completedMin": start.astimezone().isoformat(), "completedMax": end.astimezone().isoformat()})
-
     def add_task(self, list_id, title, due, parent=None, notes=None):
         """新增工作；parent 指定時建立為該工作的子工作；notes 用來帶入「⏰ 時間」行。"""
         body = {"title": title}
@@ -1147,81 +1131,6 @@ def spawn_next(google, task, plan, include_deleted=False):
             "list_id": task["list_id"], "list_title": task.get("list_title", ""),
             "due": task_due(created) or plan["due"], "parent": None, "time": task.get("time"),
             "recur": task["recur"], "notes": task.get("notes", ""), "position": created.get("position", "")}
-
-
-def week_range(today, weeks_ago=0):
-    """週報的區間：週一 00:00 到下週一 00:00（不含）。weeks_ago＝0 本週、1 上週。
-
-    @return (週一, 下週一) 兩個 date
-    """
-    monday = today - dt.timedelta(days=today.weekday(), weeks=weeks_ago)
-    return monday, monday + dt.timedelta(days=7)
-
-
-def _short_day(day):
-    return f"{day.month}/{day.day}（{WEEKDAY_NAME[day.weekday()]}）"
-
-
-def build_weekly_report(done, start, end, lists):
-    """把區間內完成的待辦整理成週報文字：依清單分組（照清單順序），組內依完成時間排序。
-
-    同一清單同標題的（例如每天的週期待辦）合併成一行並標次數；子工作縮排在父工作下方（父工作也在週報裡時）。
-    純文字＋「- 」項目符號，貼到 Markdown、Teams、Email 都能讀。
-
-    @param done completed_task 格式的已完成任務
-    @param start 週一；@param end 下週一（不含）
-    @param lists 清單（決定分組順序）
-    @return 週報全文
-    """
-    lines = [f"週報 {_short_day(start)}～{_short_day(end - dt.timedelta(days=1))}", ""]
-    if not done:
-        return "\n".join(lines + ["這段期間沒有完成的待辦"])
-    order = {lst["id"]: index for index, lst in enumerate(lists)}
-    ids = {t["id"] for t in done}
-    children = {}
-    for t in done:
-        if t.get("parent") in ids:
-            children.setdefault(t["parent"], []).append(t)
-    by_list = {}
-    for t in sorted(done, key=lambda t: t["completed"] or dt.datetime.min):
-        if t.get("parent") not in ids:
-            by_list.setdefault(t["list_id"], []).append(t)
-    for list_id in sorted(by_list, key=lambda i: order.get(i, len(order))):
-        items = by_list[list_id]
-        lines.append(f"【{items[0]['list_title'] or '未命名清單'}】")
-        counts, firsts = {}, []
-        for t in items:  # 同標題合併，保留第一次出現的順序
-            if t["title"] not in counts:
-                firsts.append(t)
-            counts[t["title"]] = counts.get(t["title"], 0) + 1
-        for t in firsts:
-            times = counts[t["title"]]
-            lines.append(f"- {t['title']}" + (f"（{times} 次）" if times > 1 else ""))
-            for child in children.get(t["id"], []):
-                lines.append(f"  - {child['title']}")
-        lines.append("")
-    lines.append(f"共完成 {len(done)} 件")
-    return "\n".join(lines)
-
-
-def wrapup_summary(done_count, remaining):
-    """每日收尾的摘要：(標題, 說明)。remaining 為今天與逾期還沒完成的待辦。
-
-    @return 例如 ("今天完成 6 件", "還剩 2 件：\\n寫週報、回信")；都完成時說明為「今天的待辦都完成了」
-    """
-    title = f"今天完成 {done_count} 件" if done_count else "今天還沒有完成的待辦"
-    if not remaining:
-        return title, "今天的待辦都完成了"
-    names = "、".join(t["title"] for t in remaining[:3]) + ("…" if len(remaining) > 3 else "")
-    return title, f"還剩 {len(remaining)} 件：\n{names}"  # 換行：不讓「還剩 3 件」在空格處被折斷
-
-
-def meeting_start_text(start, now):
-    """會議提醒的時間說明：「14:00 開始（還有 5 分鐘）」「14:00 開始（已開始 3 分鐘）」。"""
-    minutes = round((start - now).total_seconds() / 60)
-    if minutes > 0:
-        return f"{start:%H:%M} 開始（還有 {minutes} 分鐘）"
-    return f"{start:%H:%M} 開始" + (f"（已開始 {-minutes} 分鐘）" if minutes < 0 else "")
 
 
 def reminder_key(task_id, when):
@@ -2008,47 +1917,6 @@ def completed_task(raw, lst):
             "completed": completed}
 
 
-def meeting_link(event):
-    """行程的視訊會議連結：Google Meet 欄位優先，其次是地點與說明裡的 Teams／Meet／Zoom／Webex 網址；沒有回傳 None。
-
-    只接受 https 網址，避免點「加入會議」時開到其他協定。
-    """
-    if str(event.get("hangoutLink", "")).startswith("https://"):
-        return event["hangoutLink"]
-    for entry in event.get("conferenceData", {}).get("entryPoints", []):
-        uri = str(entry.get("uri", ""))
-        if entry.get("entryPointType") == "video" and uri.startswith("https://"):
-            return uri
-    for field in ("location", "description"):
-        match = MEETING_URL_RE.search(str(event.get(field, "")))
-        if match:
-            return match.group(0).rstrip(".,;")
-    return None
-
-
-def upcoming_meetings(events, today):
-    """從日曆行程挑出今天與明天、有開始時間的行程（全天行程與已婉拒的不算），給會議前提醒用。
-
-    @param events Calendar API 回傳的行程（可能重複，依 id＋開始時間去重）
-    @param today 今天
-    @return [{"id", "title", "start"（本機時間、不含時區）, "link"}]，依開始時間排序
-    """
-    meetings, seen = [], set()
-    for ev in events:
-        start = ev.get("start", {}).get("dateTime")
-        if not start or not ev.get("id"):
-            continue
-        if any(a.get("self") and a.get("responseStatus") == "declined" for a in ev.get("attendees", [])):
-            continue
-        begin = dt.datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
-        if not today <= begin.date() <= today + dt.timedelta(days=1) or (ev["id"], begin) in seen:
-            continue
-        seen.add((ev["id"], begin))
-        meetings.append({"id": ev["id"], "title": ev.get("summary") or "（無標題）", "start": begin,
-                         "link": meeting_link(ev)})
-    return sorted(meetings, key=lambda m: m["start"])
-
-
 def backfill_recurring(google, lists, since, today):
     """（背景執行緒）補建 since 之後在其他裝置（手機）完成、但還沒有下一期的週期任務。
 
@@ -2396,10 +2264,8 @@ class ReminderToast:
     active = []
     WIDTH = 300
 
-    def __init__(self, app, task, when, on_done, on_snooze, link=None):
-        """on_done 為 None 時是日曆行程的會議提醒：顯示開始時間、「加入會議」（有 link 時）與「知道了」。"""
+    def __init__(self, app, task, when, on_done, on_snooze):
         self.app = app
-        meeting = on_done is None
         win = self.win = tk.Toplevel(app)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
@@ -2409,8 +2275,7 @@ class ReminderToast:
 
         head = tk.Frame(body, bg=BG)
         head.pack(fill="x")
-        tk.Label(head, text="DayNote 會議提醒" if meeting else "DayNote 提醒", bg=BG, fg=GRAY,
-                 font=SMALL).pack(side="left")
+        tk.Label(head, text="DayNote 提醒", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
         close = tk.Label(head, text="✕", bg=BG, fg=GRAY, font=ICON_FONT, cursor="hand2")
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: self.close())
@@ -2419,39 +2284,12 @@ class ReminderToast:
         when_text = f"⏰ {when:%H:%M}" + (f"（已過 {int(late)} 分鐘）" if late >= 2 else "")
         if when.date() != dt.date.today():
             when_text = f"⏰ {when.month}/{when.day} {when:%H:%M}"
-        if meeting:
-            when_text = f"📅 {meeting_start_text(when, dt.datetime.now())}"
         tk.Label(body, text=when_text, bg=BG, fg=ACCENT, font=FONT, anchor="w").pack(fill="x", pady=(px(6), 0))
         tk.Label(body, text=task["title"], bg=BG, fg=TEXT, font=(UI_FONT, 12, "bold"),
                  anchor="w", justify="left", wraplength=px(self.WIDTH - 40)).pack(fill="x", pady=(px(2), px(10)))
 
         buttons = tk.Frame(body, bg=BG)
         buttons.pack(fill="x")
-        if meeting:
-            self._meeting_buttons(buttons, link)
-        else:
-            self._task_buttons(buttons, on_done, on_snooze)
-
-        ReminderToast.active.append(self)
-        ReminderToast.relayout()
-        win_style_popup(win)
-        try:
-            winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
-        except RuntimeError:
-            pass  # 沒有音效裝置時靜音
-
-    def _meeting_buttons(self, buttons, link):
-        """會議提醒的按鈕：有視訊連結時「加入會議」（開瀏覽器／Teams），右邊一律有「知道了」。"""
-        if link:
-            join = Pill(buttons, "加入會議", lambda: (self.close(), webbrowser.open(link)), style="primary",
-                        padx=12, pady=3)
-            join.pack(side="right")
-            self.btn_join = join
-        Pill(buttons, "知道了", self.close, style="outline", padx=12, pady=3).pack(
-            side="right", padx=(0, px(8)) if link else 0)
-
-    def _task_buttons(self, buttons, on_done, on_snooze):
-        """待辦提醒的按鈕：完成、延後 10 分鐘、其他延後時間。"""
         # 膠囊按鈕和主視窗一致；延後按鈕寫明「再提醒」，第一次看到的人不用猜
         # 最常用的 10 分鐘一鍵完成，其他時間（30 分鐘、1 小時、明天早上）放在旁邊的 ▾ 選單，比照 Windows 通知
         done = Pill(buttons, "✓ 完成", lambda: (self.close(), on_done()), style="primary", padx=12, pady=3)
@@ -2464,9 +2302,17 @@ class ReminderToast:
         self.btn_more_snooze = more
         snooze = Pill(buttons, f"{default}再提醒", lambda: self.snooze(0), style="outline", padx=12, pady=3)
         snooze.pack(side="right", padx=(0, px(4)))
-        self.snooze_menu = PopupMenu(self.win)
+        self.snooze_menu = PopupMenu(win)
         for index, (label, _) in enumerate(snooze_options(dt.datetime.now())[1:], start=1):
             self.snooze_menu.add_command(label=f"{label}再提醒", command=lambda i=index: self.snooze(i))
+
+        ReminderToast.active.append(self)
+        ReminderToast.relayout()
+        win_style_popup(win)
+        try:
+            winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        except RuntimeError:
+            pass  # 沒有音效裝置時靜音
 
     def snooze(self, index):
         """依 snooze_options 的第 index 個選項延後；時間在按下當下才計算。"""
@@ -2500,42 +2346,6 @@ class ReminderToast:
         if self.win.winfo_exists():
             self.win.destroy()
         ReminderToast.relayout()
-
-
-class WrapUpToast(ReminderToast):
-    """每日收尾（下班時間）：右下角摘要今天完成幾件、還剩哪些，可一鍵把剩下的移到明天。"""
-
-    def __init__(self, app, title, detail, remaining):
-        self.app = app
-        win = self.win = tk.Toplevel(app)
-        win.overrideredirect(True)
-        win.attributes("-topmost", True)
-        win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
-        body = tk.Frame(win, bg=BG, padx=px(14), pady=px(10))
-        body.pack(fill="both")
-        head = tk.Frame(body, bg=BG)
-        head.pack(fill="x")
-        tk.Label(head, text="DayNote 每日收尾", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
-        close = tk.Label(head, text="✕", bg=BG, fg=GRAY, font=ICON_FONT, cursor="hand2")
-        close.pack(side="right")
-        close.bind("<Button-1>", lambda e: self.close())
-        tk.Label(body, text=title, bg=BG, fg=TEXT, font=(UI_FONT, 12, "bold"), anchor="w").pack(
-            fill="x", pady=(px(6), 0))
-        tk.Label(body, text=detail, bg=BG, fg=GRAY, font=FONT, anchor="w", justify="left",
-                 wraplength=px(self.WIDTH - 40)).pack(fill="x", pady=(px(2), px(10)))
-        buttons = tk.Frame(body, bg=BG)
-        buttons.pack(fill="x")
-        if remaining:
-            self.btn_move = Pill(buttons, "全部移到明天", lambda: (self.close(), app.move_to_tomorrow(remaining)),
-                                 style="primary", padx=12, pady=3)
-            self.btn_move.pack(side="right")
-            Pill(buttons, "開啟清單", lambda: (self.close(), app.show_main()), style="outline", padx=12, pady=3).pack(
-                side="right", padx=(0, px(8)))
-        else:
-            Pill(buttons, "知道了", self.close, style="primary", padx=12, pady=3).pack(side="right")
-        ReminderToast.active.append(self)
-        ReminderToast.relayout()
-        win_style_popup(win)
 
 
 class QuickBar:
@@ -2972,7 +2782,6 @@ class App(tk.Tk):
         self.selected = self.today
         self.view = (self.today.year, self.today.month)
         self.lists, self.tasks, self.events = [], [], {}
-        self.meetings = []  # 今天、明天有時間的行程（會議前提醒用），見 upcoming_meetings
         self.done_today = []  # 今天完成的任務（含 completed 完成時間），見 completed_task
         self.holidays = {}  # {日期: [(名稱, 是否放假)]}
         self.holiday_calendar = holiday_calendar
@@ -3404,22 +3213,6 @@ class App(tk.Tk):
             self.menu_theme.add_radiobutton(label=theme["name"], value=key, variable=self.theme_var,
                                             command=lambda k=key: self.set_theme(k))
         self.menu_more.add_cascade(label="風格", menu=self.menu_theme)
-        # 會議提醒：日曆行程開始前幾分鐘跳提醒（有視訊連結時附「加入會議」）
-        self.menu_meeting = PopupMenu(self)
-        self.meeting_var = tk.IntVar(self, value=self._meeting_remind_min())
-        for minutes in MEETING_REMIND_OPTIONS:
-            self.menu_meeting.add_radiobutton(label=f"開始前 {minutes} 分鐘" if minutes else "不提醒", value=minutes,
-                                              variable=self.meeting_var,
-                                              command=lambda m=minutes: self.set_meeting_remind(m))
-        self.menu_more.add_cascade(label="會議提醒", menu=self.menu_meeting)
-        # 每日收尾：下班時間摘要今天完成幾件、還剩哪些
-        self.menu_wrapup = PopupMenu(self)
-        self.wrapup_var = tk.StringVar(self, value=self._wrapup_at_text())
-        for at in WRAPUP_OPTIONS:
-            self.menu_wrapup.add_radiobutton(label=at or "不提醒", value=at, variable=self.wrapup_var,
-                                             command=lambda a=at: self.set_wrapup_at(a))
-        self.menu_more.add_cascade(label="每日收尾", menu=self.menu_wrapup)
-        self.menu_more.add_command(label="產生週報", command=self.open_weekly_report)
         self.menu_more.add_separator()
         self.menu_more.add_command(label="立即同步（F5）", command=self.refresh)
         self.menu_more.add_separator()
@@ -4525,7 +4318,6 @@ class App(tk.Tk):
             if not self.g.refresh_token:
                 # 登入已失效：清掉舊帳號的資料，比照登出，大日期旁的「下一件」和月曆圓點才不會留著舊內容
                 self.lists, self.tasks, self.events = [], [], {}
-                self.meetings = []
                 self.done_today = []
                 self.list_index = -1
             if self.detail or self.draft:
@@ -4691,85 +4483,8 @@ class App(tk.Tk):
             ReminderToast(self, task, when,
                           on_done=lambda t=task: self.complete(t),
                           on_snooze=lambda label, fire_at, k=key: self._snooze(k, label, fire_at))
-        changed = self._fire_meeting_reminders(now) or changed
         if changed:
             self._save_reminder_state()
-        self._maybe_wrap_up(now)
-
-    def _wrapup_at_text(self):
-        """每日收尾時間文字（「18:00」，空字串＝不提醒）；state.json 沒有或值不合法時用預設。"""
-        value = self.state_data.get("wrapup_at", WRAPUP_DEFAULT)
-        return value if value in WRAPUP_OPTIONS else WRAPUP_DEFAULT
-
-    def set_wrapup_at(self, at):
-        """「⋯」→「每日收尾」：記住時間，下一次檢查就生效。"""
-        self.state_data["wrapup_at"] = at
-        save_state(self.state_data)
-        self._set_status(f"每日收尾：{at} 提醒" if at else "已關閉每日收尾")
-
-    def _maybe_wrap_up(self, now):
-        """到了收尾時間（一天一次）就跳出摘要；沒登入、沒有任何待辦或已經太晚時不跳。"""
-        at = self._wrapup_at_text()
-        if not at or not self.g.refresh_token or self.state_data.get("wrapup_last") == now.date().isoformat():
-            return
-        start = dt.datetime.combine(now.date(), dt.time.fromisoformat(at))
-        if not start <= now < start + dt.timedelta(hours=WRAPUP_WINDOW_H):
-            return
-        remaining = sorted((t for t in self._top_level() if t["due"] and t["due"] <= now.date()),
-                           key=lambda t: (t["due"], self._order_key(t)))
-        done_count = len(self.done_today)
-        self.state_data["wrapup_last"] = now.date().isoformat()
-        save_state(self.state_data)
-        if not remaining and not done_count:
-            return  # 今天什麼都沒有，不打擾
-        title, detail = wrapup_summary(done_count, remaining)
-        log.info("Wrap-up shown: done=%d remaining=%d", done_count, len(remaining))
-        WrapUpToast(self, title, detail, remaining)
-
-    def move_to_tomorrow(self, tasks):
-        """每日收尾的「全部移到明天」：沿用右鍵改日期（可復原）。"""
-        self.reschedule([t for t in tasks if t in self.tasks], dt.date.today() + dt.timedelta(days=1))
-
-    def _meeting_remind_min(self):
-        """會議提醒提前幾分鐘（0＝不提醒）；state.json 沒有或值不合法時用預設。"""
-        value = self.state_data.get("meeting_remind_min", MEETING_REMIND_DEFAULT_MIN)
-        return value if value in MEETING_REMIND_OPTIONS else MEETING_REMIND_DEFAULT_MIN
-
-    def set_meeting_remind(self, minutes):
-        """「⋯」→「會議提醒」：記住提前幾分鐘提醒，下一次檢查就生效。"""
-        self.state_data["meeting_remind_min"] = minutes
-        save_state(self.state_data)
-        self._set_status(f"會議提醒：開始前 {minutes} 分鐘" if minutes else "已關閉會議提醒")
-
-    def _fire_meeting_reminders(self, now):
-        """日曆行程開始前跳出提醒（附「加入會議」連結）；同一場只提醒一次，已開始太久就不補跳。
-
-        @return 是否有新的提醒記錄需要存檔
-        """
-        lead = self._meeting_remind_min()
-        if not lead:
-            return False
-        changed = False
-        for meeting in self.meetings:
-            when = meeting["start"]
-            key = reminder_key(f"event:{meeting['id']}", when)
-            if key in self.reminded:
-                continue
-            fire_at = self.snoozed.get(key, when - dt.timedelta(minutes=lead))
-            if now < fire_at:
-                continue
-            self.reminded.add(key)
-            self.snoozed.pop(key, None)
-            changed = True
-            if now - when > dt.timedelta(minutes=MEETING_LATE_MIN):
-                log.info("Meeting reminder skipped (already started): event=%s start=%s now=%s",
-                         meeting["id"], when.isoformat(), now.isoformat(timespec="seconds"))
-                continue
-            log.info("Meeting reminder fired: event=%s start=%s now=%s has_link=%s",
-                     meeting["id"], when.isoformat(), now.isoformat(timespec="seconds"), bool(meeting["link"]))
-            ReminderToast(self, {"title": meeting["title"]}, when, on_done=None, on_snooze=None,
-                          link=meeting["link"])
-        return changed
 
     def _snooze(self, key, label, fire_at):
         """延後提醒到 fire_at；記在 state.json，重開 DayNote 也會照時間再提醒。"""
@@ -4873,77 +4588,6 @@ class App(tk.Tk):
         win_style_popup(win)
         win.focus_force()
 
-    def open_weekly_report(self, weeks_ago=0):
-        """週報視窗：選本週或上週，讀取期間完成的待辦整理成文字，可以先修改再一鍵複製。已開著就換區間重讀。"""
-        if getattr(self, "report_win", None) and self.report_win.winfo_exists():
-            self.report_win.destroy()
-        win = self.report_win = tk.Toplevel(self)
-        win.overrideredirect(True)
-        win.attributes("-topmost", True)
-        win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
-        body = tk.Frame(win, bg=BG, padx=px(18), pady=px(14))
-        body.pack(fill="both", expand=True)
-
-        head = tk.Frame(body, bg=BG)
-        head.pack(fill="x")
-        tk.Label(head, text="週報", bg=BG, fg=TEXT, font=TITLE_FONT, anchor="w").pack(side="left")
-        self._icon_button(head, "✕", win.destroy, tip="關閉（Esc）").pack(side="right")
-
-        ranges = tk.Frame(body, bg=BG)
-        ranges.pack(fill="x", pady=(px(8), px(6)))
-        for offset, label in ((0, "本週"), (1, "上週")):
-            Pill(ranges, label, lambda o=offset: self.open_weekly_report(o),
-                 style="primary" if offset == weeks_ago else "soft", padx=12, pady=3).pack(side="left", padx=(0, px(6)))
-        tk.Label(ranges, text="內容可以先修改再複製", bg=BG, fg=GRAY, font=SMALL).pack(side="right")
-
-        self.report_text = self._rounded_field(
-            body, lambda parent: tk.Text(parent, width=40, height=16, wrap="word", font=FONT, relief="flat",
-                                         bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),
-            pady=(0, px(10)))
-        self.report_text.insert("1.0", "讀取中…")
-
-        bottom = tk.Frame(body, bg=BG)
-        bottom.pack(fill="x")
-        self.btn_report_copy = Pill(bottom, "複製", self._copy_weekly_report, style="primary", padx=16, pady=3)
-        self.btn_report_copy.pack(side="right")
-        Pill(bottom, "關閉", win.destroy, style="outline", padx=14, pady=3).pack(side="right", padx=(0, px(6)))
-
-        win.bind("<Escape>", lambda e: win.destroy())
-        win.update_idletasks()  # 置中在主視窗上；超出螢幕時往內收
-        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
-        x = self.winfo_rootx() + (self.winfo_width() - w) // 2
-        y = self.winfo_rooty() + px(60)
-        screen = win_virtual_screen()
-        if screen:
-            x = min(max(x, screen[0]), screen[2] - w)
-            y = min(max(y, screen[1]), screen[3] - h)
-        win.geometry(f"+{x}+{y}")
-        win_style_popup(win)
-        win.focus_force()
-
-        start, end = week_range(dt.date.today(), weeks_ago)
-        lists = list(self.lists)
-
-        def work():
-            begin, finish = (dt.datetime.combine(d, dt.time()) for d in (start, end))
-            done = [completed_task(raw, lst) for lst in lists for raw in self.g.completed_between(lst["id"], begin, finish)
-                    if raw.get("status") == "completed" and not raw.get("deleted")]
-            return build_weekly_report(done, start, end, lists)
-
-        def done(text, err):
-            if not win.winfo_exists():
-                return  # 讀取期間關掉或換了區間
-            self.report_text.delete("1.0", "end")
-            self.report_text.insert("1.0", f"讀取失敗：{err}" if err else text)
-        self.run_bg(work, done)
-
-    def _copy_weekly_report(self):
-        """複製週報視窗的內容（含使用者的修改）到剪貼簿。"""
-        self.clipboard_clear()
-        self.clipboard_append(self.report_text.get("1.0", "end-1c"))
-        self._set_status("已複製週報，可以直接貼上")
-        self.report_win.destroy()
-
     def _shift_day(self, days):
         if self.detail or self.draft or isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)):
             return  # 詳細頁、新增頁或輸入框中，方向鍵交給輸入框移動游標
@@ -5008,7 +4652,6 @@ class App(tk.Tk):
     def _after_logout(self, revoked, err):
         self.busy = False
         self.lists, self.tasks, self.events = [], [], {}
-        self.meetings = []
         self.done_today = []
         self.list_index = -1
         self.redraw()
@@ -5053,15 +4696,10 @@ class App(tk.Tk):
         events = {}
         # 月曆會顯示前後月的幾天，查詢範圍前後放寬
         start, end = first - dt.timedelta(days=7), next_month + dt.timedelta(days=14)
-        raw_events = self.g.events(start, end)
-        for ev in raw_events:
+        for ev in self.g.events(start, end):
             for day, when in event_days(ev):
                 events.setdefault(day, []).append((when, ev.get("summary") or "（無標題）"))
-        # 會議提醒需要今天、明天的行程；看別的月份時查詢範圍不含今天，另外補抓
         today = now.date()
-        if not (start <= today and today + dt.timedelta(days=2) <= end):
-            raw_events = list(raw_events) + list(self.g.events(today, today + dt.timedelta(days=2)))
-        meetings = upcoming_meetings(raw_events, today)
         # 今天完成的任務（含手機上完成的），給清單底部的「已完成」區塊
         midnight = dt.datetime.combine(today, dt.time())
         done_today = []
@@ -5076,7 +4714,7 @@ class App(tk.Tk):
             spawned, ok = backfill_recurring(self.g, lists, self.backfill_since, now.date())
             tasks.extend(spawned)
             mark = now if ok else self.backfill_since  # 有失敗就不前進，下次重試（防重複確保不會多建）
-        return view, lists, tasks, events, self._load_holidays(start, end), mark, meetings, done_today
+        return view, lists, tasks, events, self._load_holidays(start, end), mark, done_today
 
     def _load_holidays(self, start, end):
         """（背景執行緒）讀取節慶假日。失敗只是不顯示節日，不影響任務同步。
@@ -5112,7 +4750,7 @@ class App(tk.Tk):
             else:
                 self.after_idle(self.refresh)
             return
-        view, self.lists, self.tasks, self.events, self.holidays, mark, self.meetings, self.done_today = result
+        view, self.lists, self.tasks, self.events, self.holidays, mark, self.done_today = result
         if self.detail:
             self.detail["task"] = self._find_task(self.detail["task"]["id"]) or self.detail["task"]
         self.backfill_since = mark

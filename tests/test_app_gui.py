@@ -93,12 +93,6 @@ class StoreGoogle:
         return [self._api(t) for t in self.tasks.values() if t["list_id"] == list_id
                 and t["status"] == "completed" and not t.get("deleted") and t.get("completed_at", since) > since]
 
-    def completed_between(self, list_id, start, end):
-        self._hit("completed_between")
-        return [self._api(t) for t in self.tasks.values() if t["list_id"] == list_id
-                and t["status"] == "completed" and not t.get("deleted")
-                and start <= t.get("completed_at", start) < end]
-
     def events(self, start, end, calendar_id="primary"):
         self._hit(f"events:{calendar_id}")
         return list(self.events_by_cal.get(calendar_id, []))
@@ -363,8 +357,7 @@ class AppTestCase(unittest.TestCase):
         hook = {}
         if not self.first_run:
             with open(os.path.join(self.tmp, "state.json"), "w", encoding="utf-8") as f:
-                # 每日收尾依實際時鐘觸發，預設關閉以免傍晚跑測試時多跳一個視窗；收尾的測試自己打開
-                json.dump({"tips_shown": True, "compact_calendar": self.compact_calendar, "wrapup_at": ""}, f)
+                json.dump({"tips_shown": True, "compact_calendar": self.compact_calendar}, f)
         with unittest.mock.patch.object(daynote, "win_hook_messages",
                                         lambda w, **k: hook.update(k) or object()):
             self.app = daynote.App(self.g, holiday_calendar=kw.pop("holiday_calendar", HOLIDAY_CAL),
@@ -619,7 +612,7 @@ class StartupTest(AppTestCase):
         app.update()
         # Then: 項目都在
         labels = [item["label"] for item, _ in menu.rows]
-        self.assertEqual(labels, ["使用說明與快捷鍵（F1）", "風格", "會議提醒", "每日收尾", "產生週報", "立即同步（F5）", "登出 Google"])
+        self.assertEqual(labels, ["使用說明與快捷鍵（F1）", "風格", "立即同步（F5）", "登出 Google"])
         # When: 點使用說明
         menu._click(0)
         app.update()
@@ -878,110 +871,6 @@ class SyncDuringWriteTest(AppTestCase):
         # Then: Google 與清單都是新標題
         self.assertEqual(self.g.tasks[task_id]["title"], "寫週報（急）")
         self.assertIn("寫週報（急）", self.list_texts())
-
-
-class WeeklyReportTest(AppTestCase):
-    """「⋯」→「產生週報」：本週完成的待辦整理成文字，可修改後複製。"""
-
-    def test_report_lists_this_week_and_copies(self):
-        """本週完成兩筆 > 週報依清單列出；改一下內容按「複製」 > 剪貼簿是修改後的內容，視窗關閉"""
-        # Given: 本週（今天）完成的兩筆
-        for title, list_id in (("寫週報", "L1"), ("買牛奶", "L2")):
-            task_id = self.g.seed(title, self.today, list_id=list_id, status="completed")
-            self.g.tasks[task_id]["completed_at"] = dt.datetime.now()
-        app = self.start()
-        # When: 開週報並等讀取完成
-        app.menu_more.invoke("產生週報")
-        settle(app)
-        text = app.report_text.get("1.0", "end-1c")
-        # Then: 分組列出
-        self.assertIn("【工作】\n- 寫週報", text)
-        self.assertIn("【個人】\n- 買牛奶", text)
-        self.assertIn("共完成 2 件", text)
-        # When: 加一行再複製
-        app.report_text.insert("end", "\n下週：上線")
-        click(app.btn_report_copy)
-        # Then: 剪貼簿含修改，視窗關閉
-        self.assertTrue(self.clipboard.endswith("下週：上線"))
-        self.assertFalse(app.report_win.winfo_exists())
-
-    def test_last_week_excludes_this_week(self):
-        """切到「上週」 > 本週完成的不會出現"""
-        # Given: 今天完成一筆
-        task_id = self.g.seed("寫週報", self.today, status="completed")
-        self.g.tasks[task_id]["completed_at"] = dt.datetime.now()
-        app = self.start()
-        # When: 開上週的週報
-        app.open_weekly_report(weeks_ago=1)
-        settle(app)
-        # Then: 沒有資料
-        self.assertIn("這段期間沒有完成的待辦", app.report_text.get("1.0", "end-1c"))
-
-
-class WrapUpTest(AppTestCase):
-    """每日收尾：下班時間摘要今天完成幾件、還剩哪些，可一鍵移到明天。"""
-
-    def at(self, hhmm):
-        return dt.datetime.combine(self.today, dt.time.fromisoformat(hhmm))
-
-    def test_wrap_up_moves_remaining_to_tomorrow(self):
-        """18:00 到了、今天完成 1 件還剩 1 件 > 跳出摘要；按「全部移到明天」 > 剩下的移到明天"""
-        # Given: 今天兩筆待辦，完成其中一筆，收尾時間 18:00
-        self.g.seed("寫週報", self.today)
-        left = self.g.seed("回信", self.today)
-        app = self.start()
-        app.set_wrapup_at("18:00")
-        app.complete(next(t for t in app.tasks if t["title"] == "寫週報"))
-        settle(app)
-        # When: 18:01 檢查
-        app._maybe_wrap_up(self.at("18:01"))
-        toast = daynote.ReminderToast.active[-1]
-        # Then: 摘要
-        self.assertIn("今天完成 1 件", texts(toast.win))
-        self.assertIn("還剩 1 件：\n回信", texts(toast.win))
-        # When: 全部移到明天
-        click(toast.btn_move)
-        settle(app)
-        # Then: Google 上改到明天
-        tomorrow = self.today + dt.timedelta(days=1)
-        self.assertTrue(self.g.tasks[left]["due"].startswith(tomorrow.isoformat()))
-        self.assertEqual(daynote.ReminderToast.active, [])
-
-    def test_wrap_up_once_per_day(self):
-        """同一天檢查兩次 > 只跳一次"""
-        # Given: 今天一筆待辦
-        self.g.seed("回信", self.today)
-        app = self.start()
-        app.set_wrapup_at("18:00")
-        # When: 18:01、18:30 各檢查一次
-        app._maybe_wrap_up(self.at("18:01"))
-        app._maybe_wrap_up(self.at("18:30"))
-        # Then: 只有一個
-        self.assertEqual(len(daynote.ReminderToast.active), 1)
-
-    def test_wrap_up_not_before_time_or_too_late(self):
-        """還沒到 18:00，或已過了 3 小時以上 > 不跳"""
-        # Given: 今天一筆待辦
-        self.g.seed("回信", self.today)
-        app = self.start()
-        app.set_wrapup_at("18:00")
-        # When: 17:59、21:30 檢查
-        app._maybe_wrap_up(self.at("17:59"))
-        app._maybe_wrap_up(self.at("21:30"))
-        # Then: 都不跳
-        self.assertEqual(daynote.ReminderToast.active, [])
-
-    def test_wrap_up_turned_off(self):
-        """「⋯」→「每日收尾」選「不提醒」 > 到時間也不跳，設定存檔"""
-        # Given: 今天一筆待辦
-        self.g.seed("回信", self.today)
-        app = self.start()
-        # When: 選不提醒後在 18:01 檢查
-        app.menu_wrapup.invoke("不提醒")
-        app._maybe_wrap_up(self.at("18:01"))
-        # Then: 不跳
-        self.assertEqual(daynote.ReminderToast.active, [])
-        self.assertEqual(app.state_data["wrapup_at"], "")
 
 
 # ---------------------------------------------------------------- 新增工作
@@ -2199,69 +2088,6 @@ class ReminderTest(AppTestCase):
         self.assertEqual(self.status(), "10 分鐘後再提醒")
         self.assertEqual(len(app.snoozed), 1)
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "state.json")))
-
-    def seed_meeting(self, minutes_from_now, **extra):
-        start = (dt.datetime.now() + dt.timedelta(minutes=minutes_from_now)).replace(second=0, microsecond=0)
-        if start.date() != self.today:
-            self.skipTest("午夜交界無法建立今天的行程")
-        end = start + dt.timedelta(hours=1)
-        self.g.events_by_cal["primary"].append(
-            {"id": "ev1", "summary": "週會", "start": {"dateTime": start.astimezone().isoformat()},
-             "end": {"dateTime": end.astimezone().isoformat()}, **extra})
-        return start
-
-    def test_meeting_reminder_with_join_link(self):
-        """行程 3 分鐘後開始、說明裡有 Teams 連結 > 跳出會議提醒；按「加入會議」 > 開啟連結並關閉提醒"""
-        # Given: 3 分鐘後的週會，說明有 Teams 連結
-        link = "https://teams.microsoft.com/l/meetup-join/abc"
-        self.seed_meeting(3, description=f"請準時參加 {link}")
-        app = self.start()
-        # When: 檢查提醒（預設開始前 5 分鐘）
-        app._check_reminders()
-        toast = self.toast()
-        self.assertIn("週會", texts(toast.win))
-        self.assertIn("DayNote 會議提醒", texts(toast.win))
-        with unittest.mock.patch.object(daynote.webbrowser, "open") as opened:
-            click(toast.btn_join)
-        # Then: 開啟 Teams 連結
-        opened.assert_called_once_with(link)
-        self.assertEqual(daynote.ReminderToast.active, [])
-
-    def test_meeting_reminder_not_yet(self):
-        """行程 30 分鐘後才開始 > 還不提醒"""
-        # Given: 30 分鐘後的行程
-        self.seed_meeting(30)
-        app = self.start()
-        # When: 檢查提醒
-        app._check_reminders()
-        # Then: 沒有提醒
-        self.assertEqual(daynote.ReminderToast.active, [])
-
-    def test_meeting_reminder_turned_off(self):
-        """「⋯」→「會議提醒」選「不提醒」 > 行程快開始也不提醒，設定存檔"""
-        # Given: 3 分鐘後的行程
-        self.seed_meeting(3)
-        app = self.start()
-        # When: 關閉會議提醒後檢查
-        app.menu_meeting.invoke("不提醒")
-        app._check_reminders()
-        # Then: 沒有提醒，設定已記住
-        self.assertEqual(daynote.ReminderToast.active, [])
-        self.assertEqual(app.state_data["meeting_remind_min"], 0)
-
-    def test_meeting_reminder_without_link(self):
-        """沒有視訊連結的行程 > 只有「知道了」，按了關閉；再檢查一次不重複提醒"""
-        # Given: 2 分鐘後的實體會議
-        self.seed_meeting(2, location="3F 會議室")
-        app = self.start()
-        app._check_reminders()
-        toast = self.toast()
-        self.assertFalse(hasattr(toast, "btn_join"))
-        # When: 按知道了，再檢查一次
-        click(find_label(toast.win, "知道了"))
-        app._check_reminders()
-        # Then: 不再跳
-        self.assertEqual(daynote.ReminderToast.active, [])
 
 
 # ---------------------------------------------------------------- 視窗
