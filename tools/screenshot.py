@@ -14,7 +14,7 @@
     detail     工作詳細資訊                  new        新增工作
     loggedout  尚未登入                      quick      快速列（Ctrl + Alt + D）
     quicktype  快速列輸入中（顯示辨識結果）  toast      右下角提醒
-    meeting    會議前提醒（含「加入會議」）
+    meeting    會議前提醒（含「加入會議」）  done       今天的「已完成」區塊（展開）
 
 - 不會讀寫 data 資料夾、不連網路：資料全部來自 tests/test_app_gui.py 的 StoreGoogle 替身
 - 只使用 Python 標準函式庫（Win32 GDI 擷取畫面、zlib 編碼 PNG）
@@ -44,7 +44,7 @@ if "--theme" in sys.argv[:-1]:
 from tests.test_app_gui import HOLIDAY_CAL, StoreGoogle, daynote, pump, settle  # noqa: E402
 
 PAGES = ("main", "month", "daytip", "help", "datepicker", "timepicker", "recurpicker", "moremenu", "taskmenu",
-         "snoozemenu", "confirm", "asktext", "detail", "new", "loggedout", "quick", "quicktype", "toast", "meeting")
+         "snoozemenu", "confirm", "asktext", "detail", "new", "loggedout", "quick", "quicktype", "toast", "meeting", "done")
 DEFAULT_OUT = os.path.join(ROOT, "docs", "images", "00-app.png")
 
 
@@ -138,6 +138,15 @@ def open_page(app, g, page, today):
     """切換到要截圖的畫面，回傳要截的視窗。"""
     if page == "month":
         app.toggle_compact()
+    elif page == "done":
+        for title in ("回信給客戶", "買牛奶"):
+            app.complete(next(t for t in app.tasks if t["title"] == title))
+        pump(app, 0.5)
+        app._hide_undo()
+        app.show_done = True
+        app.redraw()
+        app.update()
+        app.list_canvas.yview_moveto(1)
     elif page == "daytip":
         left, top, right, _ = app._cal_cell_rect(today)
         app.cal.event_generate("<Motion>", x=(left + right) // 2, y=top + 5)

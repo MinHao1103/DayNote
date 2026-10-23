@@ -729,6 +729,61 @@ class StartupTest(AppTestCase):
         self.assertEqual(app.tasks, [])
 
 
+class DoneSectionTest(AppTestCase):
+    """今天完成的待辦收在清單底部的「已完成」區塊，可以改回未完成。"""
+
+    def done_circle(self, title):
+        label = find_label(self.app.list_frame, title)
+        inner = label.master.master
+        return next(w for w in inner.winfo_children() if isinstance(w, tk.Canvas))
+
+    def test_completed_task_listed_and_reopened(self):
+        """完成待辦 > 出現在收合的「已完成（1）」；展開後點打勾圓圈 > 改回未完成，回到今天的清單"""
+        # Given: 今天有一筆待辦
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        # When: 完成
+        app.complete(app.tasks[0])
+        settle(app)
+        # Then: 已完成區塊（預設收合）
+        self.assertIn("▶ 已完成（1）", self.list_texts())
+        self.assertIn("今天的待辦都完成了", self.list_texts())
+        # When: 展開並點打勾圓圈
+        click(find_label(app.list_frame, "▶ 已完成（1）"))
+        click(self.done_circle("寫週報"))
+        settle(app)
+        # Then: 回到未完成，Google 上也改回來
+        self.assertEqual(self.g.tasks[task_id]["status"], "needsAction")
+        self.assertEqual([t["title"] for t in app.tasks], ["寫週報"])
+        self.assertEqual(app.done_today, [])
+        self.assertFalse([text for text in self.list_texts() if "已完成" in text])
+
+    def test_completed_on_phone_shows_after_sync(self):
+        """手機上今天完成的待辦 > 同步後出現在「已完成」區塊"""
+        # Given: Google 上今天已完成的待辦
+        task_id = self.g.seed("繳電話費", self.today, status="completed")
+        self.g.tasks[task_id]["completed_at"] = dt.datetime.now()
+        # When: 啟動同步
+        app = self.start()
+        # Then: 已完成區塊有它
+        self.assertEqual([t["title"] for t in app.done_today], ["繳電話費"])
+        click(find_label(app.list_frame, "▶ 已完成（1）"))
+        self.assertIn("繳電話費", self.list_texts())
+
+    def test_undo_removes_from_done(self):
+        """完成後按狀態列「復原」 > 從「已完成」區塊拿掉"""
+        # Given: 剛完成一筆
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        app.complete(app.tasks[0])
+        settle(app)
+        # When: 復原
+        app.undo()
+        settle(app)
+        # Then: 不在已完成
+        self.assertEqual(app.done_today, [])
+
+
 # ---------------------------------------------------------------- 新增工作
 
 class AddTaskTest(AppTestCase):

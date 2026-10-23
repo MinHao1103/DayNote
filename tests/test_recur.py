@@ -840,6 +840,7 @@ class FakeApp:
     delete_detail = daynote.App.delete_detail
     _children = daynote.App._children
     _add_spawned = getattr(daynote.App, "_add_spawned", None)
+    _drop_done = daynote.App._drop_done
 
     def __init__(self, tasks, google=None, today=D(2026, 10, 5), now=None):
         self.tasks = list(tasks)
@@ -855,6 +856,7 @@ class FakeApp:
         self.closed_detail = []      # 每次 close_detail 的 save 參數
         self.pending_fields = {}     # 詳細頁尚未儲存的修改（API 欄位格式）
         self.reminded, self.snoozed = set(), {}
+        self.done_today = []         # 今天完成的任務（「已完成」區塊）
         self.reminder_saves = 0
         self.before_done = None      # 模擬背景工作完成、回呼執行前插入的事件（例如同步）
 
@@ -1810,8 +1812,9 @@ class BackfillTest(unittest.TestCase):
         remote = [raw_task("t1", "繳費", D(2026, 9, 1), "🔁 每天", status="completed")]
         # When: 第一次同步
         loader, result = self.load(remote, since=None)
-        # Then: 沒有查詢已完成、沒有新增，時間點設為現在
-        self.assertNotIn("completed_since", [r[0] for r in loader.g.reads])
+        # Then: 只查今天完成的（「已完成」區塊用），沒有回溯更早的歷史、沒有新增，時間點設為現在
+        midnight = dt.datetime.combine(loader.now.date(), T(0, 0))
+        self.assertEqual({midnight}, {r[1][1] for r in loader.g.reads if r[0] == "completed_since"})
         self.assertEqual([], loader.g.calls)
         self.assertEqual(loader.now, backfill_mark(result))
 

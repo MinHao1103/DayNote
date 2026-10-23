@@ -1919,6 +1919,18 @@ def event_days(event):
     return [(begin.date(), begin.strftime("%H:%M"))]
 
 
+def completed_task(raw, lst):
+    """Google 上已完成的任務轉成「已完成」區塊用的 dict；completed 為本機完成時間（API 沒給時為 None）。"""
+    time_value, rule, notes = split_meta(raw.get("notes", ""))
+    stamp = raw.get("completed")
+    completed = (dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+                 if isinstance(stamp, str) and stamp else None)
+    return {"id": raw["id"], "title": raw.get("title") or "（無標題）", "list_id": lst["id"],
+            "list_title": lst.get("title", ""), "due": task_due(raw), "parent": raw.get("parent"),
+            "time": time_value, "recur": rule, "notes": notes, "position": raw.get("position", ""),
+            "completed": completed}
+
+
 def meeting_link(event):
     """行程的視訊會議連結：Google Meet 欄位優先，其次是地點與說明裡的 Teams／Meet／Zoom／Webex 網址；沒有回傳 None。
 
@@ -2848,6 +2860,7 @@ class App(tk.Tk):
         self.view = (self.today.year, self.today.month)
         self.lists, self.tasks, self.events = [], [], {}
         self.meetings = []  # 今天、明天有時間的行程（會議前提醒用），見 upcoming_meetings
+        self.done_today = []  # 今天完成的任務（含 completed 完成時間），見 completed_task
         self.holidays = {}  # {日期: [(名稱, 是否放假)]}
         self.holiday_calendar = holiday_calendar
         self.weeks = []
@@ -2855,6 +2868,7 @@ class App(tk.Tk):
         self.last_refresh = 0.0
         self.show_undated = False
         self.show_overdue = True
+        self.show_done = False  # 「已完成」區塊預設收合，今天的待辦才是重點
         # 預設只顯示這一週，把高度留給今天的清單（比照 Windows 11 工作列月曆、To Do「我的一天」）；
         # 已經存過設定的使用者沿用原本的選擇
         self.compact = bool(self.state_data.get("compact_calendar", True))
@@ -3557,11 +3571,22 @@ class App(tk.Tk):
                 self._card(event[1], "Google 日曆", None, at=event[0])
         for task in previews:
             self._preview_card(task)
-        if not events and not tasks and not previews:
+        done = sorted(self.done_today, key=lambda t: t["completed"] or dt.datetime.min) if day == self.today else []
+        if not events and not tasks and not previews and done:
+            tk.Label(self.list_frame, text="今天的待辦都完成了", bg=BG, fg=GRAY, font=FONT).pack(pady=(px(14), px(8)))
+        elif not events and not tasks and not previews:
             # 空狀態順便教新增方式：第一次用的人不必翻說明就知道從哪裡開始
             tk.Label(self.list_frame, text="這天沒有任務", bg=BG, fg=GRAY, font=FONT).pack(pady=(px(14), 0))
             tk.Label(self.list_frame, text="在下方輸入框打字新增，例如：明天 3點 開會",
                      bg=BG, fg=GRAY, font=SMALL).pack(pady=(px(2), px(8)))
+
+        if done:
+            # 今天完成的（含手機上完成的）收在這裡；點圓圈改回未完成，5 秒復原過了也找得回來
+            self._section_header(f"已完成（{len(done)}）", self.show_done, self._toggle_done, fg=GRAY)
+            if self.show_done:
+                for task in done:
+                    at = f"{task['completed']:%H:%M} 完成" if task["completed"] else "已完成"
+                    self._card(task["title"], " · ".join(p for p in (at, task["list_title"]) if p), task, done=True)
 
         undated = sorted((t for t in top_level if t["due"] is None), key=self._order_key)
         if undated:
@@ -3692,19 +3717,23 @@ class App(tk.Tk):
                        at_fg=RED if is_late(child, now) else GRAY,
                        gap=tight if index < len(children) - 1 else None)
 
-    def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None, gap=None):
+    def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None, gap=None, done=False):
         """清單中的一筆：圓角卡片浮在底色上，卡片之間留空隙（取代分隔線）；滑過時卡片變色。
 
         task 為 None 時是日曆行程：卡片左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
         at＝右側時間欄文字（14:00、全天）；行程與待辦的時間都靠右對齊，掃一眼就能讀出順序。
         gap＝和下一張卡片的空隙；父工作與子工作之間縮小空隙，看起來是同一組。
+        done＝已完成區塊的卡片：實心打勾圓圈（點了改回未完成）、灰色標題、不開詳細頁。
         """
         subtitle_fg, at_fg = subtitle_fg or GRAY, at_fg or GRAY
         row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(50))
         row.pack(fill="x", padx=(CHILD_INDENT if indent else 0, px(2)))
         row.card_fill = CARD
         inner = tk.Frame(row, bg=CARD)
-        if task:
+        if task and done:
+            circle = self._done_circle(inner, task, bg=CARD)
+            circle.pack(side="left", padx=(0, px(10)))
+        elif task:
             circle = self._check_circle(inner, task, bg=CARD)
             circle.pack(side="left", padx=(0, px(10)))
             count = len(self._children(task))
@@ -3720,9 +3749,10 @@ class App(tk.Tk):
             lbl_at.pack(side="right", anchor="n", padx=(px(8), px(4)), pady=(px(2), 0))
         text = tk.Frame(inner, bg=CARD)
         text.pack(side="left", fill="x", expand=True)
-        lbl_title = tk.Label(text, text=title, bg=CARD, fg=TEXT, font=FONT, anchor="w", justify="left")
+        lbl_title = tk.Label(text, text=title, bg=CARD, fg=GRAY if done else TEXT, font=FONT, anchor="w",
+                             justify="left")
         lbl_title.pack(fill="x")
-        preview = _notes_preview(task.get("notes", "")) if task else ""
+        preview = _notes_preview(task.get("notes", "")) if task and not done else ""
         if preview:  # 比照 Google Tasks：標題下方顯示詳細資訊第一行
             tk.Label(text, text=preview, bg=CARD, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
         if subtitle:
@@ -3730,7 +3760,7 @@ class App(tk.Tk):
         pad_x, pad_y = px(12), px(6)  # 卡片內距
         gap = px(5) if gap is None else gap  # 卡片之間的空隙（不畫卡片）
         window = row.create_window(pad_x, pad_y, window=inner, anchor="nw")
-        if task:  # 點整列（圓圈以外）開啟詳細頁；按右鍵開快速選單（改日期、完成）
+        if task and not done:  # 點整列（圓圈以外）開啟詳細頁；按右鍵開快速選單（改日期、完成）
             for widget in (row, inner, text, *text.winfo_children(), *([lbl_at] if lbl_at else [])):
                 widget.bind("<Button-1>", lambda e: self.open_detail(task))
                 widget.bind("<Button-3>", lambda e: self._popup_task_menu(task, e))
@@ -3801,6 +3831,41 @@ class App(tk.Tk):
             self.after(250, lambda: self.complete(task))  # 讓使用者看到勾選效果再移除
         c.bind("<Button-1>", done)
         return c
+
+    def _done_circle(self, parent, task, bg):
+        """已完成的實心打勾圓圈：點了改回未完成；週期待辦已建立下一期，不提供改回（避免出現兩期）。"""
+        size = px(22)
+        d = size - px(2)
+        c = tk.Canvas(parent, width=size, height=size, bg=bg, highlightthickness=0)
+        c.create_image((size - d) // 2, (size - d) // 2, image=round_image(c, d, GRAY, bg), anchor="nw", tags="ring")
+        c.create_text(size / 2, size / 2, text="✓", fill=CARD, font=SMALL)
+        c.on_bg = lambda color: c.itemconfigure("ring", image=round_image(c, d, GRAY, color))  # 卡片 hover 換底色時跟著換
+        if task.get("recur"):
+            Tooltip(c, "週期待辦：已建立下一期，請到下一期修改")
+            return c
+        c.config(cursor="hand2")
+        c.bind("<Button-1>", lambda e: self.reopen(task))
+        Tooltip(c, "改回未完成")
+        return c
+
+    def reopen(self, task):
+        """把今天完成的待辦改回未完成：先移回清單，失敗再放回「已完成」並顯示錯誤。"""
+        if task not in self.done_today:
+            return
+        self.done_today.remove(task)
+        opened = {k: v for k, v in task.items() if k != "completed"}
+        self.tasks.append(opened)
+        self._set_status(f"已改回未完成「{task['title']}」")
+        self.redraw()
+
+        def done(_, err):
+            if err:
+                if opened in self.tasks:
+                    self.tasks.remove(opened)
+                self.done_today.append(task)
+                self.redraw()
+                self._show_error(err)
+        self.run_bg(lambda: self.g.uncomplete_task(task["list_id"], task["id"]), done)
 
     def _placeholder_text(self):
         return "新增工作，例如：明天 3點 開會"
@@ -4287,6 +4352,7 @@ class App(tk.Tk):
                 # 登入已失效：清掉舊帳號的資料，比照登出，大日期旁的「下一件」和月曆圓點才不會留著舊內容
                 self.lists, self.tasks, self.events = [], [], {}
                 self.meetings = []
+                self.done_today = []
                 self.list_index = -1
             if self.detail or self.draft:
                 self._draw_list()        # 編輯中的頁面不動，只把背後的清單換成登入提示
@@ -4366,6 +4432,10 @@ class App(tk.Tk):
 
     def _toggle_undated(self):
         self.show_undated = not self.show_undated
+        self._draw_list()
+
+    def _toggle_done(self):
+        self.show_done = not self.show_done
         self._draw_list()
 
     def _toggle_overdue(self):
@@ -4659,6 +4729,7 @@ class App(tk.Tk):
         self.busy = False
         self.lists, self.tasks, self.events = [], [], {}
         self.meetings = []
+        self.done_today = []
         self.list_index = -1
         self.redraw()
         self._show_login_button(True)
@@ -4709,12 +4780,21 @@ class App(tk.Tk):
         if not (start <= today and today + dt.timedelta(days=2) <= end):
             raw_events = list(raw_events) + list(self.g.events(today, today + dt.timedelta(days=2)))
         meetings = upcoming_meetings(raw_events, today)
+        # 今天完成的任務（含手機上完成的），給清單底部的「已完成」區塊
+        midnight = dt.datetime.combine(today, dt.time())
+        done_today = []
+        for lst in lists:
+            try:
+                done_today += [completed_task(raw, lst) for raw in self.g.completed_since(lst["id"], midnight)
+                               if raw.get("status") == "completed" and not raw.get("deleted")]
+            except ApiError as e:  # 只是附加資訊，抓不到不影響這次同步
+                log.warning("Failed to load completed tasks: list=%s error=%s", lst["id"], e)
         mark = now
         if self.backfill_since is not None:  # 第一次同步只記錄時間點，不回溯歷史
             spawned, ok = backfill_recurring(self.g, lists, self.backfill_since, now.date())
             tasks.extend(spawned)
             mark = now if ok else self.backfill_since  # 有失敗就不前進，下次重試（防重複確保不會多建）
-        return view, lists, tasks, events, self._load_holidays(start, end), mark, meetings
+        return view, lists, tasks, events, self._load_holidays(start, end), mark, meetings, done_today
 
     def _load_holidays(self, start, end):
         """（背景執行緒）讀取節慶假日。失敗只是不顯示節日，不影響任務同步。
@@ -4739,7 +4819,7 @@ class App(tk.Tk):
         if err:
             self._show_error(err)
             return
-        view, self.lists, self.tasks, self.events, self.holidays, mark, self.meetings = result
+        view, self.lists, self.tasks, self.events, self.holidays, mark, self.meetings, self.done_today = result
         self.backfill_since = mark
         self.state_data["backfill_since"] = mark.isoformat()
         save_state(self.state_data)
@@ -4864,6 +4944,8 @@ class App(tk.Tk):
         group = [task] + self._children(task)
         for t in group:  # 先從畫面移除，失敗再放回
             self.tasks.remove(t)
+        finished = [dict(t, completed=self._now()) for t in group]
+        self.done_today.extend(finished)  # 立刻出現在「已完成」區塊
         self.redraw()  # 也會更新 self.today，之後才計算下一期
         plan = next_task_for(task, self.today)
 
@@ -4881,6 +4963,7 @@ class App(tk.Tk):
             if err:
                 # 可能已部分完成；先放回畫面並顯示錯誤，下次同步會以 Google 上的實際狀態為準
                 self.tasks.extend(group)
+                self._drop_done(group)
                 self.redraw()
                 self._show_error(err)
                 return
@@ -4889,6 +4972,11 @@ class App(tk.Tk):
             warning = f"已完成「{task['title']}」，但下一期建立失敗：{spawn_err}" if spawn_err else None
             self._offer_undo(group, [spawned] if spawned else [], warning)
         self.run_bg(work, done)
+
+    def _drop_done(self, group):
+        """從「已完成」區塊拿掉這些任務（完成失敗或復原時）。"""
+        ids = {t["id"] for t in group}
+        self.done_today = [t for t in self.done_today if t["id"] not in ids]
 
     def _add_spawned(self, spawned):
         """把新建的下一期放進畫面；同步可能已先讀到同一筆，依 id 避免重複。提醒時間已過就不再跳。"""
@@ -4973,6 +5061,7 @@ class App(tk.Tk):
             return
         self._hide_undo()
         self.tasks.extend(group)
+        self._drop_done(group)
         for s in spawned:
             if s in self.tasks:
                 self.tasks.remove(s)
