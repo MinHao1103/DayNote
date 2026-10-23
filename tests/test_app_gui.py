@@ -574,7 +574,7 @@ class StartupTest(AppTestCase):
         app.update()
         # Then: 項目都在
         labels = [item["label"] for item, _ in menu.rows]
-        self.assertEqual(labels, ["使用說明與快捷鍵（F1）", "風格", "立即同步（F5）", "登出 Google"])
+        self.assertEqual(labels, ["使用說明與快捷鍵（F1）", "風格", "會議提醒", "立即同步（F5）", "登出 Google"])
         # When: 點使用說明
         menu._click(0)
         app.update()
@@ -1927,6 +1927,69 @@ class ReminderTest(AppTestCase):
         self.assertEqual(self.status(), "10 分鐘後再提醒")
         self.assertEqual(len(app.snoozed), 1)
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "state.json")))
+
+    def seed_meeting(self, minutes_from_now, **extra):
+        start = (dt.datetime.now() + dt.timedelta(minutes=minutes_from_now)).replace(second=0, microsecond=0)
+        if start.date() != self.today:
+            self.skipTest("午夜交界無法建立今天的行程")
+        end = start + dt.timedelta(hours=1)
+        self.g.events_by_cal["primary"].append(
+            {"id": "ev1", "summary": "週會", "start": {"dateTime": start.astimezone().isoformat()},
+             "end": {"dateTime": end.astimezone().isoformat()}, **extra})
+        return start
+
+    def test_meeting_reminder_with_join_link(self):
+        """行程 3 分鐘後開始、說明裡有 Teams 連結 > 跳出會議提醒；按「加入會議」 > 開啟連結並關閉提醒"""
+        # Given: 3 分鐘後的週會，說明有 Teams 連結
+        link = "https://teams.microsoft.com/l/meetup-join/abc"
+        self.seed_meeting(3, description=f"請準時參加 {link}")
+        app = self.start()
+        # When: 檢查提醒（預設開始前 5 分鐘）
+        app._check_reminders()
+        toast = self.toast()
+        self.assertIn("週會", texts(toast.win))
+        self.assertIn("DayNote 會議提醒", texts(toast.win))
+        with unittest.mock.patch.object(daynote.webbrowser, "open") as opened:
+            click(toast.btn_join)
+        # Then: 開啟 Teams 連結
+        opened.assert_called_once_with(link)
+        self.assertEqual(daynote.ReminderToast.active, [])
+
+    def test_meeting_reminder_not_yet(self):
+        """行程 30 分鐘後才開始 > 還不提醒"""
+        # Given: 30 分鐘後的行程
+        self.seed_meeting(30)
+        app = self.start()
+        # When: 檢查提醒
+        app._check_reminders()
+        # Then: 沒有提醒
+        self.assertEqual(daynote.ReminderToast.active, [])
+
+    def test_meeting_reminder_turned_off(self):
+        """「⋯」→「會議提醒」選「不提醒」 > 行程快開始也不提醒，設定存檔"""
+        # Given: 3 分鐘後的行程
+        self.seed_meeting(3)
+        app = self.start()
+        # When: 關閉會議提醒後檢查
+        app.menu_meeting.invoke("不提醒")
+        app._check_reminders()
+        # Then: 沒有提醒，設定已記住
+        self.assertEqual(daynote.ReminderToast.active, [])
+        self.assertEqual(app.state_data["meeting_remind_min"], 0)
+
+    def test_meeting_reminder_without_link(self):
+        """沒有視訊連結的行程 > 只有「知道了」，按了關閉；再檢查一次不重複提醒"""
+        # Given: 2 分鐘後的實體會議
+        self.seed_meeting(2, location="3F 會議室")
+        app = self.start()
+        app._check_reminders()
+        toast = self.toast()
+        self.assertFalse(hasattr(toast, "btn_join"))
+        # When: 按知道了，再檢查一次
+        click(find_label(toast.win, "知道了"))
+        app._check_reminders()
+        # Then: 不再跳
+        self.assertEqual(daynote.ReminderToast.active, [])
 
 
 # ---------------------------------------------------------------- 視窗
