@@ -47,6 +47,7 @@ CONFIG_PATH = os.path.join(DATA_DIR, "config.json")   # Google 用戶端設定
 TOKEN_PATH = os.path.join(DATA_DIR, "token.bin")      # DPAPI 加密的登入憑證
 STATE_PATH = os.path.join(DATA_DIR, "state.json")     # 視窗位置、提醒記錄等，由程式自動寫入
 PID_PATH = os.path.join(DATA_DIR, "daynote.pid")      # 執行中的程序編號，用來只保留一個 DayNote
+PID_READ_RETRIES = 3  # PID 檔連續讀不到幾次（每秒檢查一次）才當作被取代而關閉
 LOG_PATH = os.path.join(DATA_DIR, "daynote.log")      # 提醒觸發紀錄，用來追查「提醒時間不對」
 log = logging.getLogger("daynote")
 # 舊版（所有檔案放在同一層）的位置 → 新位置；啟動時自動搬移
@@ -377,9 +378,29 @@ def load_refresh_token():
         return None
 
 
+def write_file_atomic(path, data):
+    """先寫到同資料夾的暫存檔再整個換上，寫到一半斷電或當機時，原本的檔案仍完整。
+
+    @param path 目標檔案路徑
+    @param data 要寫入的 bytes
+    """
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)  # 失敗時不留下半成品暫存檔
+        except OSError:
+            pass
+        raise
+
+
 def save_refresh_token(token):
-    with open(TOKEN_PATH, "wb") as f:
-        f.write(_dpapi(token.encode("utf-8"), encrypt=True))
+    write_file_atomic(TOKEN_PATH, _dpapi(token.encode("utf-8"), encrypt=True))
 
 
 def delete_refresh_token():
@@ -401,10 +422,10 @@ def load_state():
 
 def save_state(state):
     try:
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except OSError:
-        pass  # 存不了只影響下次開啟的位置，不中斷關閉流程
+        write_file_atomic(STATE_PATH, json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"))
+    except OSError as e:
+        # 存不了只影響下次開啟的位置與提醒記錄，不中斷關閉流程
+        log.warning("Failed to save state: path=%s error=%s", STATE_PATH, e)
 
 
 # ---------------------------------------------------------------- Windows 視窗輔助
@@ -1186,7 +1207,7 @@ def parse_time_text(text):
         hour, minute = int(match.group(1)), int(match.group(2) or 0)
         return dt.time(hour, minute) if hour < 24 and minute < 60 else None
     quick = _QUICK_TIME_RE.match(text)
-    if quick and quick.group("period"):  # 有寫上午／下午才交給快速列的規則換算
+    if quick and quick.group("period") and quick.group("hour"):  # 有寫上午／下午且有幾點，才交給快速列的規則換算
         return _quick_time(text)
     match = re.match(r"^(\d{1,2})點(?:(半)|(\d{1,2})分?)?$", text)
     if match:
@@ -1239,18 +1260,38 @@ def next_up_text(items, now):
 # ---------------------------------------------------------------- 快速列：一行文字辨識成待辦
 
 _DAY_CHARS = {c: i for i, c in enumerate(WEEKDAY_NAME)} | {"天": 6}
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "兩": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_NUM = r"[零〇一二兩三四五六七八九十]{1,3}"  # 中文數字（零～九十九），例如：三、十二、二十五
+
+
+def _cn_number(text):
+    """阿拉伯數字或中文數字（零～九十九）轉成 int；無法辨識回傳 None。例如：「15」→15、「十五」→15、「二十」→20。"""
+    if text.isdigit():
+        return int(text)
+    if "十" in text:
+        tens, _, ones = text.partition("十")
+        if (tens and tens not in _CN_DIGITS) or (ones and ones not in _CN_DIGITS):
+            return None
+        return (_CN_DIGITS[tens] if tens else 1) * 10 + (_CN_DIGITS[ones] if ones else 0)
+    return _CN_DIGITS.get(text) if len(text) == 1 else None
+
 _WEEK_WORD = r"(?:週|周|星期|禮拜)"
 _QUICK_DATE_RE = re.compile(
     r"^(?:(?P<rel>今天|今日|明天|明日|大後天|後天)"
-    r"|(?P<ndays>\d{1,2})天後"
+    r"|(?P<ndays>\d{1,2}|" + _CN_NUM + r")天後"
+    r"|(?P<nweeks>\d|[一二兩三四])(?:個)?" + _WEEK_WORD + r"後"
     r"|(?P<next>下)" + _WEEK_WORD + r"(?P<nextday>[一二三四五六日天])"
     r"|這?" + _WEEK_WORD + r"(?P<thisday>[一二三四五六日天])"
     r"|(?P<m1>\d{1,2})/(?P<d1>\d{1,2})"
     r"|(?P<m2>\d{1,2})月(?P<d2>\d{1,2})[日號]?"
     r"|(?P<none>無日期|不排日期))")
 _QUICK_TIME_RE = re.compile(
-    r"^(?P<period>上午|早上|中午|下午|晚上|今晚)?"
-    r"(?P<hour>\d{1,2})(?:[:：](?P<colon>\d{2})|點(?:(?P<half>半)|(?P<minute>\d{1,2})分?)?)$")
+    r"^(?P<period>凌晨|上午|早上|中午|下午|晚上|今晚)?"
+    r"(?:(?P<hour>\d{1,2}|" + _CN_NUM + r")"
+    r"(?:[:：](?P<colon>\d{2})|點(?:(?P<half>半)|(?P<minute>\d{1,2}|" + _CN_NUM + r")分?)?))?$")
+# 只寫時段沒寫幾點（「明天晚上」「中午」）時的預設時間
+_PERIOD_DEFAULT = {"凌晨": dt.time(1, 0), "上午": dt.time(9, 0), "早上": dt.time(9, 0), "中午": dt.time(12, 0),
+                   "下午": dt.time(15, 0), "晚上": dt.time(20, 0), "今晚": dt.time(20, 0)}
 _RELATIVE_DAYS = {"今天": 0, "今日": 0, "明天": 1, "明日": 1, "後天": 2, "大後天": 3}
 NO_DATE = "no-date"  # 使用者明確寫了「無日期」
 
@@ -1260,7 +1301,10 @@ def _quick_date(match, today):
     if match.group("rel"):
         return today + dt.timedelta(days=_RELATIVE_DAYS[match.group("rel")])
     if match.group("ndays"):
-        return today + dt.timedelta(days=int(match.group("ndays")))
+        days = _cn_number(match.group("ndays"))
+        return today + dt.timedelta(days=days) if days else None
+    if match.group("nweeks"):
+        return today + dt.timedelta(weeks=_cn_number(match.group("nweeks")))
     if match.group("nextday"):
         next_monday = today + dt.timedelta(days=7 - today.weekday())
         return next_monday + dt.timedelta(days=_DAY_CHARS[match.group("nextday")])
@@ -1280,20 +1324,29 @@ def _quick_date(match, today):
 
 
 def _quick_time(text):
-    """時間片段：15:30（24 小時制照寫）、3點、3點半、下午3點15分。
+    """時間片段：15:30（24 小時制照寫）、3點、3點半、下午3點15分、下午三點、凌晨2點；只寫時段（晚上）用預設時間。
 
     沒寫上午／下午時，1～6 點當成下午（上班族「3點開會」幾乎都是下午），7～12 點照寫。
+    「晚上12點」是隔天 0 點、不屬於當天，無法用單一日期表達，不當成時間（留在標題讓使用者看到）。
     """
     match = _QUICK_TIME_RE.match(text)
     if not match:
         return None
-    hour = int(match.group("hour"))
-    minute = 30 if match.group("half") else int(match.group("minute") or match.group("colon") or 0)
     period = match.group("period")
+    if match.group("hour") is None:
+        return _PERIOD_DEFAULT.get(period)  # 沒有時段也沒有幾點（空字串）時回傳 None
+    hour = _cn_number(match.group("hour"))
+    minute = 30 if match.group("half") else _cn_number(match.group("minute") or match.group("colon") or "0")
+    if hour is None or minute is None:
+        return None
+    if period in ("晚上", "今晚") and hour == 12:
+        return None
     if period in ("下午", "晚上", "今晚") and hour < 12:
         hour += 12
     elif period == "中午" and hour < 6:
         hour += 12
+    elif period == "凌晨" and hour == 12:
+        hour = 0
     elif period is None and match.group("colon") is None and 1 <= hour <= 6:
         hour += 12
     return dt.time(hour, minute) if hour < 24 and minute < 60 else None
@@ -1316,8 +1369,9 @@ def parse_quick(text, lists, today, now, default_due=None):
     """把快速列輸入的一行文字辨識成待辦，以空白分段，辨識不出來的片段留在標題。
 
     回傳 {"title", "due", "time", "recur", "list"}；list 為 None 時由呼叫端用上次的清單。
-    - 日期：今天、明天、後天、3天後、週五、下週一、10/15、10月15日、無日期
-    - 時間：15:30、3點、3點半、下午3點15分（沒寫上午下午時 1～6 點視為下午）
+    - 日期：今天、明天、後天、3天後、三天後、一週後、週五、下週一、10/15、10月15日、無日期
+    - 時間：15:30、3點、3點半、下午3點15分、下午三點、凌晨2點（沒寫上午下午時 1～6 點視為下午）；
+      只寫時段：早上 9:00、中午 12:00、下午 15:00、晚上 20:00
     - 重複：每天、平日、每週一三五、每月15日、每月最後一天、每年3/15
     - 清單：#清單名稱（開頭相符、不分大小寫）
     沒寫日期時以 default_due 為準（主畫面＝月曆選中的那天；快速列＝今天）：
@@ -2953,11 +3007,13 @@ class App(tk.Tk):
 
     def _follow_system_theme(self):
         """跟隨 Windows 時，系統切換淺色／深色後自動換配色。"""
-        if self.state_data.get("theme") == AUTO_THEME and not self.draft and not self.detail:
-            key = resolve_theme(AUTO_THEME, system_is_dark())
-            if key != CURRENT_THEME:
-                self._rebuild_ui(key)
-        self.after(SYSTEM_THEME_CHECK_MS, self._follow_system_theme)
+        try:
+            if self.state_data.get("theme") == AUTO_THEME and not self.draft and not self.detail:
+                key = resolve_theme(AUTO_THEME, system_is_dark())
+                if key != CURRENT_THEME:
+                    self._rebuild_ui(key)
+        finally:  # 出錯也要排下一次，否則之後再也不會跟著系統換色
+            self.after(SYSTEM_THEME_CHECK_MS, self._follow_system_theme)
 
     def _rebuild_ui(self, key):
         """套用風格後重建所有畫面元件；任務、清單、選中的日期與編輯中的內容都保留。
@@ -3275,9 +3331,11 @@ class App(tk.Tk):
 
     def _tick_next_up(self):
         """每分鐘更新一次「下一件」，時間過了就換成下一件。"""
-        if not (self.detail or self.draft):
-            self._update_next_up()
-        self.after(NEXT_UP_TICK_MS, self._tick_next_up)
+        try:
+            if not (self.detail or self.draft):
+                self._update_next_up()
+        finally:  # 出錯也要排下一次，否則「下一件」從此停住
+            self.after(NEXT_UP_TICK_MS, self._tick_next_up)
 
     def _draw_calendar(self):
         c = self.cal
@@ -4247,6 +4305,13 @@ class App(tk.Tk):
     # ---- 電腦端提醒（方案 B：時間存在詳細資訊第一行）
 
     def _check_reminders(self):
+        """每隔 REMINDER_CHECK_MS 檢查一次提醒；某次檢查出錯也會繼續排下一次，不讓當天之後的提醒全部消失。"""
+        try:
+            self._fire_due_reminders()
+        finally:
+            self.after(REMINDER_CHECK_MS, self._check_reminders)
+
+    def _fire_due_reminders(self):
         """時間到的工作在右下角跳出提醒；同一筆只提醒一次（含 DayNote 重開後）。"""
         now = dt.datetime.now()
         changed = False
@@ -4275,7 +4340,6 @@ class App(tk.Tk):
                           on_snooze=lambda label, fire_at, k=key: self._snooze(k, label, fire_at))
         if changed:
             self._save_reminder_state()
-        self.after(REMINDER_CHECK_MS, self._check_reminders)
 
     def _snooze(self, key, label, fire_at):
         """延後提醒到 fire_at；記在 state.json，重開 DayNote 也會照時間再提醒。"""
@@ -4291,12 +4355,20 @@ class App(tk.Tk):
         save_state(self.state_data)
 
     def _watch_pid(self):
-        """單一執行個體：PID 檔被移除或換成別的 PID（新開的 DayNote），就正常關閉並存好狀態。"""
+        """單一執行個體：PID 檔被移除或換成別的 PID（新開的 DayNote），就正常關閉並存好狀態。
+
+        檔案暫時讀不到（防毒掃描、OneDrive 同步鎖住）不算被取代：連續 PID_READ_RETRIES 次都讀不到才關閉。
+        """
         try:
             with open(PID_PATH, encoding="ascii") as f:
                 still_mine = f.read().strip() == str(os.getpid())
-        except OSError:
+            self._pid_read_failures = 0
+        except FileNotFoundError:
             still_mine = False
+        except OSError as e:
+            self._pid_read_failures = getattr(self, "_pid_read_failures", 0) + 1
+            log.warning("Failed to read pid file: attempt=%d error=%s", self._pid_read_failures, e)
+            still_mine = self._pid_read_failures < PID_READ_RETRIES
         if still_mine:
             self.after(1000, self._watch_pid)
         else:
@@ -4867,8 +4939,17 @@ class App(tk.Tk):
             try:
                 self.q.put((on_done, work(), None))
             except Exception as e:  # 任何錯誤都必須回報到畫面，不能讓背景執行緒無聲結束
+                if not isinstance(e, (ApiError, NeedLogin)):  # 預期內的錯誤畫面上已有說明，未預期的才留 traceback
+                    log.exception("Background task failed: %s", type(e).__name__)
                 self.q.put((on_done, None, e))
         threading.Thread(target=runner, daemon=True).start()
+
+    def report_callback_exception(self, exc, val, tb):
+        """Tk 回呼（按鈕、after 計時器）沒接住的例外：寫進 daynote.log。
+
+        pythonw 沒有 stderr，Tk 預設的輸出會直接消失，出事後無從追查。
+        """
+        log.error("Unhandled error in UI callback", exc_info=(exc, val, tb))
 
     def _poll_queue(self):
         try:

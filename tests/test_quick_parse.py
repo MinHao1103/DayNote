@@ -6,6 +6,9 @@
 - 以空白分段；整段都辨識得出來的片段才算日期／時間／重複／清單，其餘留在標題（「明天見」整段不是日期）
 - 日期與時間可以黏在同一段：「明天下午3點」
 - 沒寫上午／下午時，1～6 點視為下午，7～12 點照寫；15:30 這種冒號寫法照 24 小時制
+- 只寫時段沒寫幾點：上午／早上 9:00、中午 12:00、下午 15:00、晚上／今晚 20:00、凌晨 1:00
+- 中文數字（零～九十九）等同阿拉伯數字：下午三點、三點十五分、三天後、一週後
+- 「晚上12點」是隔天 0 點，無法用單一日期表達，留在標題不當成時間
 - 只有時間：還沒過就是今天，已經過了就是明天；寫了日期就不再挪動
 - 只有重複規則：從今天起第一個符合的日子；什麼都沒寫：今天
 - 無日期：不能提醒也不能重複（一併清掉）
@@ -99,6 +102,20 @@ class QuickDateTest(unittest.TestCase):
         self.assertEqual(result["due"], TODAY)
 
 
+class QuickRelativeNumberTest(unittest.TestCase):
+
+    def test_chinese_numeral_days_and_weeks(self):
+        """三天後／二十天後／一週後／2個禮拜後 > 換算成對應日期"""
+        cases = {"三天後": 3, "二十天後": 20, "一週後": 7, "兩星期後": 14, "2個禮拜後": 14}
+        for word, offset in cases.items():
+            with self.subTest(word=word):
+                # Given / When: 辨識
+                result = quick(f"{word} 回診")
+                # Then: 日期正確、標題乾淨
+                self.assertEqual(result["due"], TODAY + dt.timedelta(days=offset))
+                self.assertEqual(result["title"], "回診")
+
+
 class QuickTimeTest(unittest.TestCase):
 
     def test_time_forms(self):
@@ -126,6 +143,47 @@ class QuickTimeTest(unittest.TestCase):
                 # Then: 留在標題
                 self.assertIsNone(result["time"])
                 self.assertEqual(result["title"], word)
+
+    def test_period_only_uses_default_time(self):
+        """「明天晚上」「週五下午」「今晚」「中午」 > 時段的預設時間，日期也照樣辨識"""
+        cases = {"明天晚上 聚餐": (D(2026, 10, 7), T(20, 0)), "週五下午 交件": (D(2026, 10, 9), T(15, 0)),
+                 "明天早上 晨跑": (D(2026, 10, 7), T(9, 0)), "今晚 看電影": (TODAY, T(20, 0)),
+                 "明天 中午 吃飯": (D(2026, 10, 7), T(12, 0))}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                # Given / When: 只寫時段
+                result = quick(text)
+                # Then: 日期與預設時間，標題乾淨
+                self.assertEqual((result["due"], result["time"]), expected)
+                self.assertEqual(len(result["title"].split()), 1)
+
+    def test_chinese_numeral_time(self):
+        """下午三點／三點十五分／十二點／凌晨2點 > 和阿拉伯數字相同的規則"""
+        cases = {"下午三點": T(15, 0), "三點": T(15, 0), "三點十五分": T(15, 15), "十點半": T(10, 30),
+                 "十二點": T(12, 0), "晚上八點": T(20, 0), "凌晨2點": T(2, 0), "凌晨12點": T(0, 0)}
+        for word, expected in cases.items():
+            with self.subTest(word=word):
+                # Given / When: 明天加中文數字時間
+                result = quick(f"明天 {word} 開會")
+                # Then: 時間正確
+                self.assertEqual(result["time"], expected)
+                self.assertEqual(result["title"], "開會")
+
+    def test_midnight_tonight_stays_in_title(self):
+        """「晚上12點」 > 不當成中午 12 點，整段留在標題讓使用者看到"""
+        # Given / When: 晚上12點
+        result = quick("晚上12點 睡")
+        # Then: 沒有時間、留在標題
+        self.assertIsNone(result["time"])
+        self.assertEqual(result["title"], "晚上12點 睡")
+
+    def test_period_word_inside_title_not_time(self):
+        """「下午茶」「早上好」 > 不是時段，留在標題"""
+        # Given / When: 含時段字的標題
+        result = quick("下午茶 早上好")
+        # Then: 都留在標題
+        self.assertIsNone(result["time"])
+        self.assertEqual(result["title"], "下午茶 早上好")
 
     def test_plain_number_is_not_time(self):
         """「買 2 個」「繳 1500」 > 純數字不是時間"""
