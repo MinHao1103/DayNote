@@ -229,7 +229,7 @@ if __name__ == "__main__" or os.environ.get("DAYNOTE_THEME"):
     apply_theme(resolve_theme(saved_theme(), system_is_dark()))
 
 FONT = (UI_FONT, 10)
-SMALL = (UI_FONT, 8)
+SMALL = (UI_FONT, 9)        # 說明文字：欄位標籤、副標題、狀態列（Windows 11 caption 最小 12px＝9pt）
 # 標題類字型：有思源宋體（Noto Serif TC）就用襯線字，否則維持正黑體；由 apply_fonts() 於啟動時決定
 SERIF_FAMILIES = ("Noto Serif TC", "Source Han Serif TC")
 TITLE_FONT = (UI_FONT, 15, "bold")         # 頁面大標題（日期、工作詳細資訊）
@@ -1518,7 +1518,8 @@ def draw_rounded(canvas, w, h, radius, fill, bg, outline=None, line=1, tag="shap
 class Pill(tk.Canvas):
     """膠囊形按鈕（反鋸齒圓角），取代方角的 Label 按鈕。text_value 保留文字，方便測試與重畫。
 
-    style：primary（主要動作，實心強調色）、soft（次要，淡色底）、outline（細框）、ghost（無底色，滑過才顯示）
+    style：primary（主要動作，實心強調色）、soft（次要，淡色底）、outline（細框）、ghost（無底色，滑過才顯示）、
+    static（只顯示不能點：灰底一般文字色，沒有滑過效果；command 傳 None）
     文字開頭的符號（📅 ⏰ 🔁 📁 ＋ ✓ ←）與結尾的「 ▾」改畫成單色線條圖示，和文字分開垂直置中。
     """
 
@@ -1529,7 +1530,8 @@ class Pill(tk.Canvas):
                 "soft": (ACCENT_SOFT, ACCENT, ACCENT_SOFT_HOVER, None),
                 "outline": (BG, TEXT, HOVER, BORDER),
                 "ghost": (BG, GRAY, HOVER, None),
-                "danger": (RED, ON_ACCENT, RED, None)}[style]
+                "danger": (RED, ON_ACCENT, RED, None),
+                "static": (CARD_BG, TEXT, CARD_BG, None)}[style]
 
     def __init__(self, parent, text, command, style="primary", font=FONT, padx=14, pady=5, bg=None):
         self.fill, self.fg, self.hover_fill, self.outline = self.palette(style)
@@ -1551,8 +1553,10 @@ class Pill(tk.Canvas):
         self.w = self.content_w + 2 * px(padx)
         self.h = measure.metrics("linespace") + 2 * px(pady)
         super().__init__(parent, width=self.w, height=self.h, bg=self.parent_bg, highlightthickness=0,
-                         cursor="hand2")
+                         cursor="hand2" if command else "")
         self._draw(self.fill)
+        if command is None:  # 只顯示：沒有滑過變色，也不能點
+            return
         self.bind("<Enter>", lambda e: self._draw(self.hover_fill))
         self.bind("<Leave>", lambda e: self._draw(self.fill))
         self.bind("<Button-1>", lambda e: command())
@@ -3197,7 +3201,7 @@ class App(tk.Tk):
         tools = tk.Frame(tools_row, bg=BG)
         tools.pack(side="right", anchor="n")
         # 未登入時才出現；用和其他按鈕一致的膠囊樣式
-        self.btn_login = Pill(tools, "登入", self.login, style="primary", font=(UI_FONT, 9), padx=10, pady=2)
+        self.btn_login = Pill(tools, "登入", self.login, style="primary", font=SMALL, padx=10, pady=2)
         Tooltip(self.btn_login, "用瀏覽器登入 Google 帳號")
         # 同步、登出這類不常用（登出還會撤銷授權）的動作收進「⋯」選單：
         # 不再緊鄰關閉鈕而誤按，右上角也只剩圖示按鈕，和 Windows 11 標題列一致
@@ -3279,13 +3283,13 @@ class App(tk.Tk):
         self.lbl_month.pack(side="left", padx=(px(4), 0))
         self.lbl_month.bind("<Button-1>", lambda e: self.toggle_compact())
         self.btn_compact = self._icon_button(
-            nav, "", self.toggle_compact, font=(UI_FONT, 9),
+            nav, "", self.toggle_compact, font=SMALL,
             tip=lambda: "展開整個月" if self.compact else "收合月曆：只顯示這一週，清單空間比較大")
         self.btn_compact.config(fg=ACCENT)
         self.btn_compact.bind("<Leave>", lambda e: self.btn_compact.config(fg=ACCENT), add="+")
         self.btn_compact.pack(side="left", padx=(px(4), 0))
         btn_today = Pill(nav, "今天", lambda: self.select(dt.date.today()), style="soft",
-                         font=(UI_FONT, 9), padx=10, pady=2)
+                         font=SMALL, padx=10, pady=2)
         btn_today.pack(side="right", padx=(px(4), px(2)))
         Tooltip(btn_today, "回到今天（Home）")
         self._icon_button(nav, "▶", lambda: self.shift_month(1),
@@ -4092,9 +4096,11 @@ class App(tk.Tk):
             pady=(px(2), px(10)), **pad)
         self.detail_title.insert(0, self.detail.get("title_draft", task["title"]))
 
-        # 既有工作不能換清單（Google Tasks 沒有跨清單移動），用一般文字顯示，不做成像按鈕的樣子
+        # 既有工作不能換清單：和日期、重複一樣用膠囊（同高、同字級、有圖示），灰底沒有箭頭表示不能點
         row_list = self._prop_row(view, "清單", pad)
-        tk.Label(row_list, text=task["list_title"], bg=BG, fg=TEXT, font=FONT, anchor="w").pack(side="left")
+        chip_list = Pill(row_list, f"📁 {task['list_title']}", None, style="static", padx=10, pady=3)
+        chip_list.pack(side="left")
+        Tooltip(chip_list, "已建立的工作不能換清單")
         row = self._prop_row(view, "日期", pad, top=px(6))
         btn_due = Pill(row, f"📅 {date_text(self.detail['due'])} ▾",
                        lambda: DatePicker(self, btn_due, self.detail["due"], self._set_detail_due),
