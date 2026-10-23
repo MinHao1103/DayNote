@@ -2977,6 +2977,9 @@ class App(tk.Tk):
         self.holiday_calendar = holiday_calendar
         self.weeks = []
         self.busy = False
+        self.pending_writes = 0     # 還沒送完的寫入（run_write）
+        self.write_seq = 0          # 每次開始寫入就加 1；同步用來判斷期間是否有寫入
+        self.resync_needed = False  # 同步結果因寫入被丟掉，最後一筆寫入完成時要再同步
         self.last_refresh = 0.0
         self.show_undated = False
         self.show_overdue = True
@@ -3985,7 +3988,7 @@ class App(tk.Tk):
                 self.done_today.append(task)
                 self.redraw()
                 self._show_error(err)
-        self.run_bg(lambda: self.g.uncomplete_task(task["list_id"], task["id"]), done)
+        self.run_write(lambda: self.g.uncomplete_task(task["list_id"], task["id"]), done)
 
     def _placeholder_text(self):
         return "新增工作，例如：明天 3點 開會"
@@ -4389,7 +4392,7 @@ class App(tk.Tk):
                     self._show_error(err)
                 else:
                     self._set_status(f"已儲存「{task['title']}」")
-            self.run_bg(lambda: self.g.update_task(task["list_id"], task["id"], fields), done)
+            self.run_write(lambda: self.g.update_task(task["list_id"], task["id"], fields), done)
         self.redraw()
 
     def complete_detail(self):
@@ -4429,7 +4432,7 @@ class App(tk.Tk):
                 self.refresh()  # 可能只刪了一部分，重新同步以 Google 上的實際狀態為準
             else:
                 self._set_status(f"已刪除「{task['title']}」")
-        self.run_bg(work, done)
+        self.run_write(work, done)
 
     def add_subtask(self, parent, title):
         if not title or title.startswith("＋"):
@@ -4448,7 +4451,7 @@ class App(tk.Tk):
             if self.detail and self.detail["task"]["id"] == parent["id"]:
                 self._rerender_detail()
             self.redraw()
-        self.run_bg(lambda: self.g.add_task(lst["id"], title, None, parent=parent["id"]), done)
+        self.run_write(lambda: self.g.add_task(lst["id"], title, None, parent=parent["id"]), done)
 
     def _show_placeholder(self):
         if not self.entry.get():
@@ -4593,7 +4596,7 @@ class App(tk.Tk):
             self._set_status(f"已建立清單「{name}」，新增的工作會放進這個清單")
             if on_created:
                 on_created(len(self.lists) - 1)
-        self.run_bg(lambda: self.g.add_tasklist(name), done)
+        self.run_write(lambda: self.g.add_tasklist(name), done)
 
     def _remember_list(self, index):
         """設定之後新增工作預設放進的清單，並記住（重開 DayNote 沿用）。"""
@@ -4972,7 +4975,9 @@ class App(tk.Tk):
         self.last_refresh = time.time()
         self._set_status("同步中…")
         view = self.view
-        self.run_bg(lambda: self._load(view), self._after_load)
+        # 開始時已有寫入還沒送完，或同步期間又有新的寫入，讀到的任務就可能是舊的（見 _after_load）
+        stale_from = None if self.pending_writes else self.write_seq
+        self.run_bg(lambda: self._load(view), lambda result, err: self._after_load(result, err, stale_from))
 
     def _load(self, view):
         """（背景執行緒）讀取清單、所有未完成任務，以及顯示月份前後的日曆事件。
@@ -5040,12 +5045,25 @@ class App(tk.Tk):
                 holidays.setdefault(day, []).append((ev.get("summary") or "", day_off))
         return holidays
 
-    def _after_load(self, result, err):
+    def _after_load(self, result, err, write_seq=None):
+        """套用同步結果。write_seq 為同步開始時的寫入序號（None＝開始時就有寫入沒送完）；
+
+        同步期間有寫入，就丟掉這次結果，等寫入都完成再同步一次，避免舊資料蓋掉剛做的修改。
+        """
         self.busy = False
         if err:
             self._show_error(err)
             return
+        if write_seq is None or write_seq != self.write_seq or self.pending_writes:
+            log.info("Sync result discarded: writes happened during sync (pending=%d)", self.pending_writes)
+            if self.pending_writes:
+                self.resync_needed = True  # 最後一筆寫入完成時會再同步
+            else:
+                self.after_idle(self.refresh)
+            return
         view, self.lists, self.tasks, self.events, self.holidays, mark, self.meetings, self.done_today = result
+        if self.detail:
+            self.detail["task"] = self._find_task(self.detail["task"]["id"]) or self.detail["task"]
         self.backfill_since = mark
         self.state_data["backfill_since"] = mark.isoformat()
         save_state(self.state_data)
@@ -5142,7 +5160,7 @@ class App(tk.Tk):
                     [(t, f) for t, f in reverse if t in self.tasks], "已復原", undoable=False))
             else:
                 self._set_status(done_text)
-        self.run_bg(work, done)
+        self.run_write(work, done)
 
     def _offer_undo_action(self, text, action):
         """狀態列顯示 text 與「復原」，UNDO_SECONDS 秒內按「復原」會執行 action。"""
@@ -5197,7 +5215,7 @@ class App(tk.Tk):
             self._add_spawned(spawned)
             warning = f"已完成「{task['title']}」，但下一期建立失敗：{spawn_err}" if spawn_err else None
             self._offer_undo(group, [spawned] if spawned else [], warning)
-        self.run_bg(work, done)
+        self.run_write(work, done)
 
     def _drop_done(self, group):
         """從「已完成」區塊拿掉這些任務（完成失敗或復原時）。"""
@@ -5259,7 +5277,7 @@ class App(tk.Tk):
                 return
             skipped = f" {task['due'].month}/{task['due'].day}" if task["due"] else ""
             self._set_status(f"已略過{skipped}，下一期 {plan['due'].month}/{plan['due'].day}")
-        self.run_bg(work, done)
+        self.run_write(work, done)
 
     def _offer_undo(self, group, spawned=(), warning=None):
         """在狀態列顯示「已完成…　復原」，UNDO_SECONDS 秒後自動收起。
@@ -5316,7 +5334,7 @@ class App(tk.Tk):
                 self._show_error(err)
             elif delete_err:
                 self._show_error(delete_err)  # 原任務已復原；下一期可能還在，下次同步以 Google 為準
-        self.run_bg(work, done)
+        self.run_write(work, done)
 
     def add_task(self):
         """底部快捷新增（Enter 或「新增」）：一行文字辨識日期、時間、重複與 #清單，沒寫日期就放在月曆選中的那天。"""
@@ -5364,7 +5382,7 @@ class App(tk.Tk):
             self.tasks.append(task)
             on_done(task, None)
         notes = join_meta(time_value, rule, body)
-        self.run_bg(lambda: self.g.add_task(lst["id"], title, due, notes=notes or None), done)
+        self.run_write(lambda: self.g.add_task(lst["id"], title, due, notes=notes or None), done)
 
     # ---- 快速列（Ctrl + Alt + D）
 
@@ -5405,6 +5423,25 @@ class App(tk.Tk):
             self.open_detail(task)
 
     # ---- 執行緒
+
+    def run_write(self, work, on_done):
+        """寫入 Google 的背景工作（新增、完成、改日期、刪除…）：同 run_bg，並記錄還有幾筆沒送完。
+
+        同步期間有寫入時，同步讀到的可能是寫入前的舊資料；_after_load 會丟掉這次結果，等寫入都完成再同步一次，
+        才不會把剛完成的待辦叫回來、或把剛改的日期改回去。
+        """
+        self.pending_writes += 1
+        self.write_seq += 1
+
+        def done(result, err):
+            self.pending_writes -= 1
+            try:
+                on_done(result, err)
+            finally:
+                if not self.pending_writes and self.resync_needed:
+                    self.resync_needed = False
+                    self.refresh()
+        self.run_bg(work, done)
 
     def run_bg(self, work, on_done):
         """在背景執行緒執行 work()，結果以 on_done(result, error) 交回主執行緒。"""

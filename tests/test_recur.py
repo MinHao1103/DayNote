@@ -895,6 +895,8 @@ class FakeApp:
                 self.before_done()
             on_done(result, None)
 
+    run_write = run_bg  # 寫入與讀取在替身裡都同步執行；寫入期間同步的處理由 GUI 測試涵蓋
+
     def redraw(self):
         pass
 

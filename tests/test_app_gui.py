@@ -791,6 +791,57 @@ class DoneSectionTest(AppTestCase):
         self.assertEqual(app.done_today, [])
 
 
+class SyncDuringWriteTest(AppTestCase):
+    """同步期間有修改：舊的同步結果不能蓋掉剛做的修改。"""
+
+    def gate_open_tasks(self):
+        """讓同步讀完任務後停住，等測試放行；回傳放行用的 Event。"""
+        gate = threading.Event()
+        original = self.g.open_tasks
+
+        def slow(list_id):
+            result = original(list_id)  # 先讀到「修改前」的資料
+            gate.wait(5)
+            return result
+        self.g.open_tasks = slow
+        return gate
+
+    def test_completed_task_not_revived_by_stale_sync(self):
+        """同步讀到資料後才完成待辦 > 舊結果被丟掉、待辦不會回來，寫入完成後自動再同步"""
+        # Given: 今天一筆待辦，同步進行中且已讀到它
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        gate = self.gate_open_tasks()
+        app.refresh()
+        pump(app, 0.2)
+        # When: 同步還沒結束時完成，之後同步才回來
+        app.complete(app.tasks[0])
+        pump(app, 0.3)
+        reads_before = self.g.calls.count("tasklists")
+        gate.set()
+        settle(app)
+        # Then: 待辦沒有回來，Google 上已完成，且又同步了一次
+        self.assertEqual(self.g.tasks[task_id]["status"], "completed")
+        self.assertEqual(app.tasks, [])
+        self.assertGreater(self.g.calls.count("tasklists"), reads_before)
+
+    def test_detail_edit_after_sync(self):
+        """詳細頁改標題、同步完成後才返回 > 清單立刻顯示新標題（修改套用在同步後的資料上）"""
+        # Given: 詳細頁改了標題，接著同步一次
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        app.open_detail(app.tasks[0])
+        app.detail_title.insert("end", "（急）")
+        app.refresh()
+        settle(app)
+        # When: 返回（自動儲存）
+        app.close_detail()
+        settle(app)
+        # Then: Google 與清單都是新標題
+        self.assertEqual(self.g.tasks[task_id]["title"], "寫週報（急）")
+        self.assertIn("寫週報（急）", self.list_texts())
+
+
 class WeeklyReportTest(AppTestCase):
     """「⋯」→「產生週報」：本週完成的待辦整理成文字，可修改後複製。"""
 
