@@ -7,7 +7,8 @@
 - 沒有日期的 🔁 任務以今天為基準
 - 子工作不支援週期；父工作的下一期不複製子工作
 - 完成成功但下一期建立失敗：維持已完成並顯示錯誤，不回滾
-- 第一版不支援「每 N 週」「每月第 N 個星期 X」，視為無效規則
+- 每 N 週（每兩週二、每2週二四、隔週五）：以這一期所在的那週為起算週，之後每 N 週；新建時第一期是最近符合的那天
+- 每月第 N 個星期 X（第一～第四、最後一個）；每月只有 4 個同星期幾時沒有「第五個」，寫第五個視為無效
 - 詳細資訊開頭出現重複的 🔁 行：取第一行，其餘視為內文
 - 略過這一期 = 先建立下一期、再刪除這一期（失敗時寧可多一筆，不讓週期中斷）；不留完成紀錄
 - 略過只在詳細頁提供；有子工作才跳確認框；不提供復原（誤按時把下一期日期改回即可）
@@ -231,15 +232,28 @@ class ParseRecurTest(unittest.TestCase):
                 # Then: 無效
                 self.assertIsNone(result)
 
-    def test_unsupported_in_v1_invalid(self):
-        """第一版不支援的寫法 > 視為無效規則"""
-        for text in ("每週", "每2週一", "每2天", "每月第1個星期三", "每月"):
+    def test_unsupported_invalid(self):
+        """不支援或不完整的寫法 > 視為無效規則"""
+        for text in ("每週", "每2天", "每月", "每兩週", "每1週二", "每月第五個週一", "每月第一個"):
             with self.subTest(text=text):
-                # Given: 間隔或第 N 個星期的規則
+                # Given: 沒有星期、間隔不合理或第 N 個超出範圍
                 # When: 解析規則
                 result = parse(text)
                 # Then: 無效
                 self.assertIsNone(result)
+
+    def test_interval_and_nth_round_trip(self):
+        """每兩週、每 N 週、每月第 N 個週 X > 各種寫法都解析得到，並統一成標準寫法"""
+        cases = {"每兩週二": "每兩週二", "每2週二四": "每兩週二四", "隔週五": "每兩週五", "每二週一": "每兩週一",
+                 "每3週一": "每3週一", "每月第一個週一": "每月第一個週一", "每月第1個星期一": "每月第一個週一",
+                 "每月的第三個禮拜三": "每月第三個週三", "每月最後一個週五": "每月最後一個週五"}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                # Given / When: 解析後轉回文字
+                result = daynote.format_recur(parse(text))
+                # Then: 標準寫法，且再解析一次結果相同
+                self.assertEqual(result, expected)
+                self.assertEqual(parse(result), parse(text))
 
     def test_surrounding_whitespace(self):
         """前後有半形或全形空白 > 正常解析"""
@@ -1175,6 +1189,64 @@ class FakeLoader:
 
     def _load_holidays(self, start, end):
         return {}
+
+
+class IntervalAndNthNextDueTest(unittest.TestCase):
+    """每兩週、每月第 N 個週 X 的下一期與預覽。"""
+
+    def test_biweekly_skips_a_week(self):
+        """每兩週二、這一期 10/20（二） > 下一期 11/3，不是 10/27"""
+        # Given / When: 下一期
+        result = daynote.next_due(parse("每兩週二"), D(2026, 10, 20), D(2026, 10, 20))
+        # Then: 隔一週
+        self.assertEqual(D(2026, 11, 3), result)
+
+    def test_biweekly_two_days_same_week(self):
+        """每兩週二四、這一期 10/20（二） > 下一期是同一週的 10/22（四），再下一期 11/3"""
+        # Given: 每兩週二四
+        rule = parse("每兩週二四")
+        # When: 連算兩期
+        first = daynote.next_due(rule, D(2026, 10, 20), D(2026, 10, 20))
+        second = daynote.next_due(rule, first, first)
+        # Then: 同週的週四，接著跳過一週
+        self.assertEqual((D(2026, 10, 22), D(2026, 11, 3)), (first, second))
+
+    def test_biweekly_overdue_keeps_cycle(self):
+        """每兩週二、這一期 10/6 逾期到 10/24 才完成 > 下一期 11/3，仍照原本的雙週節奏"""
+        # Given / When: 逾期很久才完成
+        result = daynote.next_due(parse("每兩週二"), D(2026, 10, 6), D(2026, 10, 24))
+        # Then: 10/6 起算的雙週：10/20、11/3（10/20 已過）
+        self.assertEqual(D(2026, 11, 3), result)
+
+    def test_nth_weekday(self):
+        """每月第一個週一／第三個週三／最後一個週五 > 下一期落在下個月對應的那天"""
+        cases = {"每月第一個週一": (D(2026, 10, 5), D(2026, 11, 2)),
+                 "每月第三個週三": (D(2026, 10, 21), D(2026, 11, 18)),
+                 "每月最後一個週五": (D(2026, 10, 30), D(2026, 11, 27)),
+                 "每月第四個週四": (D(2026, 10, 22), D(2026, 11, 26))}
+        for text, (base, expected) in cases.items():
+            with self.subTest(text=text):
+                # Given / When: 下一期
+                result = daynote.next_due(parse(text), base, base)
+                # Then: 下個月對應的那天
+                self.assertEqual(expected, result)
+
+    def test_last_weekday_in_five_week_month(self):
+        """2026 年 12 月有五個週四 > 「最後一個週四」是 12/31，「第四個週四」是 12/24"""
+        # Given / When: 從 11 月的那一期往下算
+        last = daynote.next_due(parse("每月最後一個週四"), D(2026, 11, 26), D(2026, 11, 26))
+        fourth = daynote.next_due(parse("每月第四個週四"), D(2026, 11, 26), D(2026, 11, 26))
+        # Then: 不同
+        self.assertEqual((D(2026, 12, 31), D(2026, 12, 24)), (last, fourth))
+
+    def test_biweekly_preview_days(self):
+        """每兩週二的待辦（這一期 10/20） > 月曆預覽只標 11/3、11/17，不標 10/27、11/10"""
+        # Given: 這一期 10/20
+        task = make_task(due=D(2026, 10, 20), recur=parse("每兩週二"))
+        # When: 預覽 10/21～11/30
+        days = daynote.upcoming_days(task, D(2026, 10, 21), D(2026, 11, 30), D(2026, 10, 21))
+        # Then: 隔週
+        self.assertEqual([D(2026, 11, 3), D(2026, 11, 17)], days)
 
 
 class LoadAndDisplayTest(unittest.TestCase):

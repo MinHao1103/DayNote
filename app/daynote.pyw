@@ -961,24 +961,43 @@ class Recur:
     """重複規則。kind：daily／weekly／monthly／yearly。
 
     weekdays 為 date.weekday() 的集合（0＝週一）；monthly 的 day 可為 LAST_DAY；yearly 使用 month＋day。
+    interval：weekly 每幾週一次（2＝每兩週），以這一期所在的那週起算。
+    nth：monthly 的「第幾個星期幾」（1～4，LAST_DAY＝最後一個），星期幾放在 weekdays（只有一天）。
     """
     kind: str
     weekdays: frozenset = frozenset()
     day: int | None = None
     month: int | None = None
+    interval: int = 1
+    nth: int | None = None
 
 
 _WEEKDAY_CHARS = {c: i for i, c in enumerate(WEEKDAY_NAME)} | {"天": 6, "7": 6} | {str(i + 1): i for i in range(6)}
+_DAY_OF_WEEK = {c: i for i, c in enumerate(WEEKDAY_NAME)} | {"天": 6}
 _WEEKLY_RE = re.compile(r"^每(?:週|周|星期)(.+)$")
 _MONTHLY_RE = re.compile(r"^每月(\d{1,2})[日號]$")
 _YEARLY_RE = re.compile(r"^每年(\d{1,2})(?:/|月)(\d{1,2})日?$")
 _WEEKDAYS_MON_FRI = frozenset(range(5))
+_WEEK = r"(?:週|周|星期|禮拜)"
+_INTERVAL_WEEKLY_RE = re.compile(r"^(?:每(?P<n>[2-9]|[兩二三四])個?" + _WEEK + r"|(?P<alt>隔)" + _WEEK + r")(?P<days>.+)$")
+_NTH_WEEKDAY_RE = re.compile(r"^每月的?(?:第(?P<nth>[1-4一二三四])個|(?P<last>最後一)個)" + _WEEK + r"(?P<day>[一二三四五六日天])$")
+_NTH_NAMES = {1: "一", 2: "二", 3: "三", 4: "四"}
+_SMALL_NUMBERS = {"一": 1, "二": 2, "兩": 2, "三": 3, "四": 4} | {str(i): i for i in range(1, 10)}
+
+
+def _weekday_set(chars):
+    """「一三五」「1、3、5」→ 星期幾的集合；有看不懂的字回傳 None。"""
+    chars = re.sub(r"[\s、,，]", "", chars)
+    if not chars or any(c not in _WEEKDAY_CHARS for c in chars):
+        return None
+    return frozenset(_WEEKDAY_CHARS[c] for c in chars)
 
 
 def parse_recur(text):
-    """解析重複規則文字（每天、平日、每週一三五、每月15日、每月最後一天、每年3/15）。無法解析回傳 None。
+    """解析重複規則文字。無法解析回傳 None。
 
-    第一版不支援「每 N 週」「每月第 N 個星期 X」。
+    每天、平日、每週一三五、每兩週二（每2週二、隔週二）、每月15日、每月最後一天、
+    每月第一個週一（每月第1個星期一）、每月最後一個週五、每年3/15。
     """
     text = (text or "").strip()
     if text == "每天":
@@ -987,12 +1006,19 @@ def parse_recur(text):
         return Recur("weekly", _WEEKDAYS_MON_FRI)
     if text == "每月最後一天":
         return Recur("monthly", day=LAST_DAY)
+    match = _INTERVAL_WEEKLY_RE.match(text)
+    if match:
+        weekdays = _weekday_set(match.group("days"))
+        interval = 2 if match.group("alt") else _SMALL_NUMBERS[match.group("n")]
+        return Recur("weekly", weekdays, interval=interval) if weekdays and interval >= 2 else None
+    match = _NTH_WEEKDAY_RE.match(text)
+    if match:
+        nth = LAST_DAY if match.group("last") else _SMALL_NUMBERS[match.group("nth")]
+        return Recur("monthly", frozenset({_DAY_OF_WEEK[match.group("day")]}), nth=nth)
     match = _WEEKLY_RE.match(text)
     if match:
-        chars = re.sub(r"[\s、,，]", "", match.group(1))
-        if not chars or any(c not in _WEEKDAY_CHARS for c in chars):
-            return None
-        return Recur("weekly", frozenset(_WEEKDAY_CHARS[c] for c in chars))
+        weekdays = _weekday_set(match.group(1))
+        return Recur("weekly", weekdays) if weekdays else None
     match = _MONTHLY_RE.match(text)
     if match:
         day = int(match.group(1))
@@ -1013,9 +1039,13 @@ def format_recur(rule):
     if rule.kind == "daily":
         return "每天"
     if rule.kind == "weekly":
-        if rule.weekdays == _WEEKDAYS_MON_FRI:
-            return "平日"
-        return "每週" + "".join(WEEKDAY_NAME[i] for i in sorted(rule.weekdays))
+        days = "".join(WEEKDAY_NAME[i] for i in sorted(rule.weekdays))
+        if rule.interval > 1:
+            return ("每兩週" if rule.interval == 2 else f"每{rule.interval}週") + days
+        return "平日" if rule.weekdays == _WEEKDAYS_MON_FRI else "每週" + days
+    if rule.kind == "monthly" and rule.nth:
+        which = "最後一" if rule.nth == LAST_DAY else f"第{_NTH_NAMES[rule.nth]}"
+        return f"每月{which}個週{WEEKDAY_NAME[next(iter(rule.weekdays))]}"
     if rule.kind == "monthly":
         return "每月最後一天" if rule.day == LAST_DAY else f"每月{rule.day}日"
     return f"每年{rule.month}/{rule.day}"
@@ -1053,24 +1083,36 @@ def join_meta(time_value, rule, body):
     return "\n".join(head + ([body] if body else [])) if head else body
 
 
-def _matches(rule, day):
+def _matches(rule, day, anchor):
+    """day 是否符合規則。anchor＝「每兩週」的起算日（這一期的日期），以它所在的那週為第 0 週。"""
     if rule.kind == "daily":
         return True
     if rule.kind == "weekly":
-        return day.weekday() in rule.weekdays
+        if day.weekday() not in rule.weekdays:
+            return False
+        weeks = ((day - dt.timedelta(days=day.weekday())) - (anchor - dt.timedelta(days=anchor.weekday()))).days // 7
+        return weeks % rule.interval == 0
     month_len = calendar.monthrange(day.year, day.month)[1]
+    if rule.kind == "monthly" and rule.nth:
+        if day.weekday() not in rule.weekdays:
+            return False
+        return day.day + 7 > month_len if rule.nth == LAST_DAY else (day.day - 1) // 7 + 1 == rule.nth
     target = month_len if rule.day == LAST_DAY else min(rule.day, month_len)  # 小月退到月底
     if rule.kind == "monthly":
         return day.day == target
     return day.month == rule.month and day.day == target
 
 
-def next_due(rule, base, today):
-    """下一期日期：原定日期（無日期時用今天）之後第一個符合規則的日子；早於今天就繼續往後推，不補出過期各期。"""
+def next_due(rule, base, today, anchor=None):
+    """下一期日期：原定日期（無日期時用今天）之後第一個符合規則的日子；早於今天就繼續往後推，不補出過期各期。
+
+    anchor＝「每兩週」的起算日，預設是原定日期（同一個週期一路延續）；新建時傳入第一期可能的日子。
+    """
+    anchor = anchor or base or today
     start = max((base or today) + dt.timedelta(days=1), today)
     for offset in range(366 * 2):
         day = start + dt.timedelta(days=offset)
-        if _matches(rule, day):
+        if _matches(rule, day, anchor):
             return day
     raise ValueError(f"找不到符合規則的日期：{rule}")
 
@@ -1083,10 +1125,11 @@ def upcoming_days(task, start, end, today):
     rule = task.get("recur")
     if not rule or task.get("parent"):
         return []
-    day = max((task.get("due") or today) + dt.timedelta(days=1), today, start)
+    anchor = task.get("due") or today
+    day = max(anchor + dt.timedelta(days=1), today, start)
     days = []
     while day <= end:
-        if _matches(rule, day):
+        if _matches(rule, day, anchor):
             days.append(day)
         day += dt.timedelta(days=1)
     return days
@@ -1399,7 +1442,8 @@ def parse_quick(text, lists, today, now, default_due=None):
     if not due_set:
         base = default_due or today
         if rule:
-            due = next_due(rule, base - dt.timedelta(days=1), today)
+            # 第一期是最近符合的那天（「每兩週二」就是最近的週二），之後才每兩週一次
+            due = next_due(dataclasses.replace(rule, interval=1), base - dt.timedelta(days=1), today)
         elif time_value and base == today and dt.datetime.combine(today, time_value) <= now:
             due = today + dt.timedelta(days=1)
         else:
@@ -2248,8 +2292,15 @@ class RecurPicker(_Popup):
 
     def _options(self):
         base = self.base
-        options = ["每天", "平日", f"每週{WEEKDAY_NAME[base.weekday()]}", f"每月{base.day}日"]
-        if base.day == calendar.monthrange(base.year, base.month)[1]:
+        weekday = WEEKDAY_NAME[base.weekday()]
+        month_len = calendar.monthrange(base.year, base.month)[1]
+        nth = (base.day - 1) // 7 + 1
+        options = ["每天", "平日", f"每週{weekday}", f"每兩週{weekday}", f"每月{base.day}日"]
+        if nth <= 4:
+            options.append(f"每月第{_NTH_NAMES[nth]}個週{weekday}")
+        if base.day + 7 > month_len:  # 這個月最後一個同星期幾
+            options.append(f"每月最後一個週{weekday}")
+        if base.day == month_len:
             options.append("每月最後一天")
         options.append(f"每年{base.month}/{base.day}")
         return [parse_recur(text) for text in options]
@@ -2280,7 +2331,7 @@ class RecurPicker(_Popup):
     def _pick_custom(self):
         rule = parse_recur(self.custom.get())
         if rule is None:
-            self.hint.config(text="例如：每天、平日、每週一三五、\n每月15日、每月最後一天、每年3/15")
+            self.hint.config(text="例如：每天、平日、每週一三五、每兩週二、\n每月15日、每月第一個週一、每年3/15")
             return
         self.pick(rule)
 

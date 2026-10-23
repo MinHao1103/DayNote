@@ -322,6 +322,21 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class QuickNewRecurTest(unittest.TestCase):
+
+    def test_new_rules_first_occurrence(self):
+        """快速新增「每兩週二」「每月第一個週一」 > 第一期是最近符合的那天（10/6 是週二，就是今天）"""
+        cases = {"每兩週二 雙週會": (TODAY, "每兩週二"), "每兩週四 讀書會": (D(2026, 10, 8), "每兩週四"),
+                 "每月第一個週一 月會": (D(2026, 11, 2), "每月第一個週一"),
+                 "每月最後一個週五 結帳": (D(2026, 10, 30), "每月最後一個週五")}
+        for text, (due, rule) in cases.items():
+            with self.subTest(text=text):
+                # Given / When: 辨識
+                result = quick(text)
+                # Then: 第一期與規則
+                self.assertEqual((result["due"], daynote.format_recur(result["recur"])), (due, rule))
+
+
 class PickerTimeTest(unittest.TestCase):
     """提醒時間選擇器（parse_time_text）：照字面 24 小時制，不猜上午／下午。"""
 
