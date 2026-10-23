@@ -691,6 +691,22 @@ class StartupTest(AppTestCase):
         self.assertEqual(app.menu_more.entrycget("登出 Google", "state"), "disabled")
 
 
+    def test_login_expired_clears_next_up(self):
+        """同步時登入已過期 > 大日期旁的「下一件」收起，不留舊帳號的待辦"""
+        # Given: 今天 23:59 有待辦，已顯示「下一件」，之後 Google 撤銷了授權
+        self.g.seed("收尾", self.today, notes="⏰ 23:59")
+        app = self.start()
+        self.g.refresh_token = None
+        self.g.fail.add("tasklists")
+        self.g.fail_with["tasklists"] = daynote.NeedLogin
+        # When: 同步
+        app.menu_more.invoke("立即同步（F5）")
+        settle(app)
+        # Then: 「下一件」收起，舊待辦清空
+        self.assertFalse(app.lbl_next.winfo_ismapped())
+        self.assertEqual(app.tasks, [])
+
+
 # ---------------------------------------------------------------- 新增工作
 
 class AddTaskTest(AppTestCase):

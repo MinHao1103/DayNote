@@ -1791,11 +1791,14 @@ class PopupMenu:
 
 
 class RoundedBox(tk.Canvas):
-    """圓角外框容器：內容放在 self.inner（Frame），高度跟著內容、寬度跟著版面；可切換外框顏色（例如取得焦點時）。"""
+    """圓角外框容器：內容放在 self.inner（Frame），高度跟著內容、寬度跟著版面；可切換外框顏色（例如取得焦點時）。
 
-    def __init__(self, parent, fill=None, outline=None, radius=16, padx=8, pady=4, bg=None):
+    stretch=True：外框被版面撐高時（pack expand），內容也跟著撐高，例如填滿頁面剩餘空間的多行輸入框。
+    """
+
+    def __init__(self, parent, fill=None, outline=None, radius=16, padx=8, pady=4, bg=None, stretch=False):
         fill, outline = fill or BG, outline or BORDER
-        self.fill, self.outline, self.radius = fill, outline, px(radius)
+        self.fill, self.outline, self.radius, self.stretch = fill, outline, px(radius), stretch
         self.parent_bg = bg or parent.cget("bg")
         self.padx, self.pady = px(padx), px(pady)
         super().__init__(parent, bg=self.parent_bg, highlightthickness=0, height=px(40))
@@ -1814,6 +1817,8 @@ class RoundedBox(tk.Canvas):
         if w < 4 or h < 4:
             return
         self.itemconfigure(self._window, width=w - 2 * self.padx)
+        if self.stretch:  # 要求高度仍由內容決定（_fit_height），這裡只把內容撐到外框實際高度
+            self.itemconfigure(self._window, height=max(h - 2 * self.pady, 1))
         draw_rounded(self, w, h, self.radius, self.fill, self.parent_bg, outline=self.outline)
 
     def set_outline(self, color):
@@ -2314,9 +2319,10 @@ class QuickBar:
         self.header.pack(fill="x")
         self.rows = tk.Frame(body, bg=BG)
         self.rows.pack(fill="x")
+        # 狀態文字（錯誤、新增中…）有內容才顯示，平常不佔一行空白；由 _set_status 決定顯示與否
         self.status = tk.Label(body, bg=BG, fg=GRAY, font=SMALL, anchor="w", justify="left")
-        self.status.pack(fill="x", pady=(px(4), 0))
-        tk.Label(body, text=self.KEYS, bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x", pady=(px(4), 0))
+        self.keys = tk.Label(body, text=self.KEYS, bg=BG, fg=GRAY, font=SMALL, anchor="w")
+        self.keys.pack(fill="x", pady=(px(4), 0))
 
         self.text.trace_add("write", lambda *_: self._on_change())
         self.entry.bind("<Return>", lambda e: self.submit())
@@ -2376,9 +2382,18 @@ class QuickBar:
             return "agenda"
         return "search" if text.lstrip().startswith("/") else "add"
 
+    def _set_status(self, text, fg=GRAY):
+        """顯示狀態文字；空字串時收起整行，視窗高度跟著調整。"""
+        self.status.config(text=text, fg=fg)
+        if text:
+            self.status.pack(fill="x", pady=(px(4), 0), before=self.keys)
+        else:
+            self.status.pack_forget()
+        self._resize()
+
     def _on_change(self):
         self.selected = 0
-        self.status.config(text="", fg=GRAY)
+        self._set_status("", GRAY)
         self.render()
 
     def render(self):
@@ -2480,20 +2495,20 @@ class QuickBar:
             return
         parsed = self.parsed
         if not parsed["title"]:
-            self.status.config(text="請輸入工作內容（目前只有日期或時間）", fg=RED)
+            self._set_status("請輸入工作內容（目前只有日期或時間）", RED)
             return
         lst = parsed["list"] or self.app.current_list()
         if lst is None:
-            self.status.config(text="請先登入 Google：按 Tab 開啟主視窗登入", fg=RED)
+            self._set_status("請先登入 Google：按 Tab 開啟主視窗登入", RED)
             return
         self.busy = True
-        self.status.config(text="新增中…", fg=GRAY)
+        self._set_status("新增中…", GRAY)
 
         def done(task, err):
             self.busy = False
             if err:
                 if self.is_open():  # 快速列還開著就在這裡顯示，主視窗可能是隱藏的
-                    self.status.config(text=str(err), fg=RED)
+                    self._set_status(str(err), RED)
                 else:
                     self.app._show_error(err)
                 return
@@ -2505,7 +2520,7 @@ class QuickBar:
     def complete(self, task):
         self.app.complete(task)
         self.render()
-        self.status.config(text=f"已完成「{task['title']}」（可在主視窗按「復原」）", fg=GRAY)
+        self._set_status(f"已完成「{task['title']}」（可在主視窗按「復原」）", GRAY)
 
     def open_main(self, task=None):
         self.close()
@@ -3719,7 +3734,7 @@ class App(tk.Tk):
         self.draft_notes = self._rounded_field(
             view, lambda parent: tk.Text(parent, height=5, wrap="word", font=FONT, relief="flat", bg=CARD_BG,
                                          fg=TEXT, insertbackground=TEXT, highlightthickness=0),
-            pady=(px(2), 0), **pad)
+            expand=True, pady=(px(2), 0), **pad)
         self.draft_notes.insert("1.0", draft["notes_draft"])
         tk.Label(view, text="子工作：建立後點這筆工作就能新增", bg=BG, fg=GRAY, font=SMALL,
                  anchor="w").pack(fill="x", pady=(px(10), 0), **pad)
@@ -3734,12 +3749,15 @@ class App(tk.Tk):
         for widget in (self.draft_title, self.draft_notes):
             widget.bind("<Escape>", lambda e: self.cancel_new_task())
 
-    def _rounded_field(self, parent, factory, **pack):
-        """圓角輸入框：factory(容器) 建立 Entry／Text，外框在取得焦點時變成強調色。回傳輸入元件。"""
-        box = RoundedBox(parent, fill=CARD_BG, outline=BORDER, radius=14, padx=10, pady=6)
-        box.pack(fill="x", **pack)
+    def _rounded_field(self, parent, factory, expand=False, **pack):
+        """圓角輸入框：factory(容器) 建立 Entry／Text，外框在取得焦點時變成強調色。回傳輸入元件。
+
+        expand=True：輸入框往下長、填滿頁面剩餘空間（詳細資訊欄），頁面下方不留一大片空白。
+        """
+        box = RoundedBox(parent, fill=CARD_BG, outline=BORDER, radius=14, padx=10, pady=6, stretch=expand)
+        box.pack(fill="both" if expand else "x", expand=expand, **pack)
         widget = factory(box.inner)
-        widget.pack(fill="x", expand=True)
+        widget.pack(fill="both" if expand else "x", expand=True)
         widget.bind("<FocusIn>", lambda e: box.set_outline(ACCENT), add="+")
         widget.bind("<FocusOut>", lambda e: box.set_outline(BORDER), add="+")
         return widget
@@ -3903,7 +3921,7 @@ class App(tk.Tk):
         self.detail_notes = self._rounded_field(
             view, lambda parent: tk.Text(parent, height=5, wrap="word", font=FONT, relief="flat", bg=CARD_BG,
                                          fg=TEXT, insertbackground=TEXT, highlightthickness=0),
-            pady=(px(2), 0), **pad)
+            expand=True, pady=(px(2), 0), **pad)
         self.detail_notes.insert("1.0", self.detail.get("notes_draft", task.get("notes", "")))
         if task.get("parent"):
             tk.Label(view, text="（這是子工作，在主畫面會顯示在父工作下方）", bg=BG, fg=GRAY, font=SMALL,
@@ -4099,7 +4117,14 @@ class App(tk.Tk):
 
     def _show_error(self, err):
         if isinstance(err, NeedLogin):
-            self._draw_list()            # 清單區顯示登入提示
+            if not self.g.refresh_token:
+                # 登入已失效：清掉舊帳號的資料，比照登出，大日期旁的「下一件」和月曆圓點才不會留著舊內容
+                self.lists, self.tasks, self.events = [], [], {}
+                self.list_index = -1
+            if self.detail or self.draft:
+                self._draw_list()        # 編輯中的頁面不動，只把背後的清單換成登入提示
+            else:
+                self.redraw()            # 清單區顯示登入提示，月曆與「下一件」一併更新
             self._show_login_button(True)
             self._set_status(str(err), error=True)
         elif isinstance(err, ApiError):
