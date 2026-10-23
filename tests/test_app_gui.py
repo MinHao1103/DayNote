@@ -175,6 +175,44 @@ def find_label(widget, text, exact=True):
     raise AssertionError(f"畫面上找不到「{text}」；目前有：{texts(widget)}")
 
 
+def when_dialog_open(app, action):
+    """等這次的對話框真的出現才執行 action(對話框)。
+
+    對話框會 wait_window 等使用者回應，測試只能事先排程操作；電腦忙時對話框可能比預期晚建立，
+    或 _active_dialog 還指向上一個已關閉的，固定延遲會操作失敗、對話框永遠不關而卡住整個測試。
+    看門狗：DIALOG_WATCHDOG_MS 內對話框還開著就強制關閉，讓測試以斷言失敗結束，而不是卡住整個測試流程。
+    """
+    app._active_dialog = None
+    found = {}
+
+    def check():
+        dialog = app._active_dialog
+        if dialog is None or not dialog.winfo_exists():
+            app.after(50, check)
+        else:
+            found["dialog"] = dialog
+            action(dialog)
+
+    def watchdog():
+        dialog = found.get("dialog")
+        if dialog is not None and dialog.winfo_exists():
+            dialog.destroy()
+    app.after(50, check)
+    app.after(DIALOG_WATCHDOG_MS, watchdog)
+
+
+DIALOG_WATCHDOG_MS = 5000
+
+
+def press_key(widget, key):
+    """對元件按鍵：Tk 的鍵盤事件只送到有焦點的視窗，先確定焦點在元件上（最多等 2 秒）再送出。"""
+    deadline = time.time() + 2
+    while widget.focus_get() is not widget and time.time() < deadline:
+        widget.focus_force()
+        widget.update()
+    widget.event_generate(key)
+
+
 def click(widget, **kw):
     """模擬滑鼠點擊；帶上元件內的螢幕座標，選擇器才不會誤判為「點在外面」而關閉。"""
     root = widget._root()
@@ -620,13 +658,13 @@ class StartupTest(AppTestCase):
         # Given: 已啟動
         app = self.start()
         dialog = daynote.ThemedMessageBox()
-        # When: 打開刪除確認，0.3 秒後按「刪除」
-        app.after(300, lambda: click(find_label(app._active_dialog, "刪除")))
+        # When: 打開刪除確認，出現後按「刪除」
+        when_dialog_open(app, lambda d: click(find_label(d, "刪除")))
         result = dialog.askyesno("刪除工作", "確定刪除？", parent=app, icon="warning", yes="刪除", no="取消")
         # Then: True
         self.assertIs(result, True)
-        # When: 打開尚未儲存，0.3 秒後按 Esc
-        app.after(300, lambda: app._active_dialog.event_generate("<Escape>"))
+        # When: 打開尚未儲存，出現後按 Esc
+        when_dialog_open(app, lambda d: press_key(d, "<Escape>"))
         result = dialog.askyesnocancel("尚未儲存", "要儲存嗎？", parent=app, yes="儲存", no="不儲存")
         # Then: None（取消）
         self.assertIsNone(result)
@@ -636,17 +674,17 @@ class StartupTest(AppTestCase):
         # Given: 已啟動
         app = self.start()
 
-        def type_and_enter():
-            entry = next(w for w in descendants(app._active_dialog) if isinstance(w, tk.Entry))
+        def type_and_enter(dialog):
+            entry = next(w for w in descendants(dialog) if isinstance(w, tk.Entry))
             entry.insert(0, "旅行")
-            entry.event_generate("<Return>")
+            press_key(entry, "<Return>")
         # When: 打「旅行」按 Enter
-        app.after(300, type_and_enter)
+        when_dialog_open(app, type_and_enter)
         name = daynote.ask_text(app, "新增清單", "清單名稱：")
         # Then: 回傳文字
         self.assertEqual(name, "旅行")
         # When: 按取消
-        app.after(300, lambda: click(find_label(app._active_dialog, "取消")))
+        when_dialog_open(app, lambda dialog: click(find_label(dialog, "取消")))
         name = daynote.ask_text(app, "新增清單", "清單名稱：")
         # Then: None
         self.assertIsNone(name)
