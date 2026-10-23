@@ -484,6 +484,28 @@ class StartupTest(AppTestCase):
             self.assertEqual(json.load(f)["theme"], "night")
         self.assertEqual(self.status(), "已換成「墨夜（深色）」")
 
+    def test_dark_toggle_button(self):
+        """右上角月亮 > 換成墨夜、圖示變太陽；再按太陽 > 回到原本的淺色風格（編輯手帳）"""
+        # Given: 使用編輯手帳風格
+        self.use_theme_cleanup()
+        app = self.start()
+        app.menu_theme.invoke("編輯手帳")
+        pump(app, 0.2)
+        self.assertEqual(app.btn_dark.text_value, "🌙")
+        # When: 按月亮
+        click(app.btn_dark)
+        pump(app, 0.2)
+        # Then: 墨夜，圖示換成太陽，選單打勾在墨夜
+        self.assertEqual(app.cget("bg"), daynote.THEMES["night"]["colors"]["BG"])
+        self.assertEqual(app.btn_dark.text_value, "☀")
+        self.assertEqual(app.theme_var.get(), "night")
+        # When: 按太陽
+        click(app.btn_dark)
+        pump(app, 0.2)
+        # Then: 回到編輯手帳，不是預設的奶油陶土
+        self.assertEqual(app.cget("bg"), daynote.THEMES["editorial"]["colors"]["BG"])
+        self.assertEqual(app.state_data["theme"], "editorial")
+
     def test_follow_windows_theme(self):
         """選「跟隨 Windows」 > 系統深色時換成墨夜；系統切回淺色 > 自動換回奶油陶土"""
         # Given: 已啟動（奶油陶土），系統是深色

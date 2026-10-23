@@ -125,7 +125,7 @@ HELP_TIPS = (
     "在待辦上按右鍵：移到今天、明天或不排日期",
     "滑鼠停在月曆日期上，看當天有幾件待辦、幾個行程",
     "按月份旁的「展開整月」看整個月",
-    "右上角「⋯」→「風格」可以換配色（例如深色）",
+    "右上角月亮／太陽切換深色、淺色；「⋯」→「風格」有更多配色",
 )
 ADD_LIST_OPTION = "＋ 新增清單…"  # 清單下拉選單的最後一項
 SELECTED = "#f5e4d8"  # 月曆選中日期：粉彩蜜桃，和強調色同色系
@@ -242,7 +242,7 @@ ICON_FAMILIES = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
 ICON_GLYPH_FONT = None   # 由 apply_fonts() 決定；None 表示沒有圖示字型，維持原本的符號
 GLYPHS = {"📅": "\ue787", "⏰": "\ue823", "🔁": "\ue8ee", "📁": "\ue8b7", "＋": "\ue710", "✓": "\ue73e",
           "←": "\ue72b", "▾": "\ue70d", "▼": "\ue70d", "▶": "\ue76c", "◀": "\ue76b", "⟳": "\ue72c",
-          "📌": "\ue718", "—": "\ue921", "✕": "\ue8bb", "⋯": "\ue712"}
+          "📌": "\ue718", "—": "\ue921", "✕": "\ue8bb", "⋯": "\ue712", "☀": "\ue706", "🌙": "\ue708"}
 
 
 def icon_parts(text):
@@ -3005,6 +3005,21 @@ class App(tk.Tk):
             return
         self.after_idle(lambda: self._rebuild_ui(key))
 
+    def _light_theme(self):
+        """切回淺色時要用的風格：上次用過的淺色風格，沒有記錄時用預設淺色。"""
+        key = self.state_data.get("light_theme")
+        return key if key in THEMES and key != AUTO_DARK else AUTO_LIGHT
+
+    def toggle_dark(self):
+        """右上角太陽／月亮：在上次用的淺色風格與墨夜之間切換（會改成固定風格，不再跟隨 Windows）。"""
+        if CURRENT_THEME == AUTO_DARK:
+            target = self._light_theme()
+        else:
+            self.state_data["light_theme"] = CURRENT_THEME  # 記住淺色風格，切回來時還原
+            target = AUTO_DARK
+        self.theme_var.set(target)  # 「⋯」→「風格」的打勾跟著移動
+        self.set_theme(target)
+
     def _follow_system_theme(self):
         """跟隨 Windows 時，系統切換淺色／深色後自動換配色。"""
         try:
@@ -3134,6 +3149,12 @@ class App(tk.Tk):
         self.menu_more.add_command(label="立即同步（F5）", command=self.refresh)
         self.menu_more.add_separator()
         self.menu_more.add_command(label="登出 Google", command=self.logout)
+        # 淺色／深色一鍵切換：淺色時顯示月亮（點了變深色），深色時顯示太陽；其他風格仍在「⋯」→「風格」
+        self.btn_dark = self._icon_button(
+            tools, "☀" if CURRENT_THEME == AUTO_DARK else "🌙", self.toggle_dark,
+            tip=lambda: f"切換到淺色（{THEMES[self._light_theme()]['name']}）" if CURRENT_THEME == AUTO_DARK
+            else f"切換到深色（{THEMES[AUTO_DARK]['name']}）")
+        self.btn_dark.pack(side="left")
         self.btn_more = self._icon_button(tools, "⋯", self._open_more_menu, tip="更多：使用說明、風格、同步、登出")
         self.btn_more.pack(side="left")
         self.btn_pin = self._icon_button(
