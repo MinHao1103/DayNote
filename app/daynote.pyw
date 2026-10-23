@@ -131,6 +131,7 @@ SELECTED = "#f5e4d8"  # 月曆選中日期：粉彩蜜桃，和強調色同色�
 DIVIDER = "#efe7da"   # 清單列之間的細分隔線
 HOVER = "#f4ece0"
 CARD = "#ffffff"
+CARD_HOVER = "#f6efe5"    # 待辦卡片滑過的底色
 ACCENT = "#985a43"        # 陶土色：白字對比 5.4:1、奶油底上當文字 5.1:1、米色欄位 4.7:1
 ACCENT_HOVER = "#854c38"
 ACCENT_SOFT = "#f3e2d6"   # 次要按鈕、選項膠囊的粉彩蜜桃底
@@ -148,25 +149,25 @@ THEMES = {
     "cream": {"name": "奶油陶土", "fonts": {"serif": True, "title": 20, "heading": 11}, "colors": {
         "BG": "#fbf7f0", "BORDER": "#e6dccc", "TEXT": "#3d342c", "EVENT_DOT": "#a9bfa2", "PREVIEW_DOT": "#e0bca8",
         "CARD_BG": "#f4ede2", "FADED_TEXT": "#cdc2b3", "ON_ACCENT": "#ffffff", "SELECTED": "#f5e4d8",
-        "DIVIDER": "#efe7da", "HOVER": "#f4ece0", "CARD": "#ffffff", "ACCENT": "#985a43",
+        "DIVIDER": "#efe7da", "HOVER": "#f4ece0", "CARD": "#ffffff", "CARD_HOVER": "#f6efe5", "ACCENT": "#985a43",
         "ACCENT_HOVER": "#854c38", "ACCENT_SOFT": "#f3e2d6", "ACCENT_SOFT_HOVER": "#ecd4c4", "RED": "#b44745",
         "HOLIDAY_RED": "#a44c54", "HOLIDAY_RED_FADED": "#e4c0c0", "FESTIVAL": "#e2b766", "GRAY": "#72665a"}},
     "editorial": {"name": "編輯手帳", "fonts": {"serif": True, "title": 24, "heading": 12}, "colors": {
         "BG": "#f7f3ea", "BORDER": "#ddd3c2", "TEXT": "#1f1b16", "EVENT_DOT": "#7f9c8a", "PREVIEW_DOT": "#e2b3a6",
         "CARD_BG": "#efe8db", "FADED_TEXT": "#cbc1b1", "ON_ACCENT": "#ffffff", "SELECTED": "#f3dcd2",
-        "DIVIDER": "#e8e0d1", "HOVER": "#f1ebdf", "CARD": "#ffffff", "ACCENT": "#b8402a",
+        "DIVIDER": "#e8e0d1", "HOVER": "#f1ebdf", "CARD": "#ffffff", "CARD_HOVER": "#f6f0e4", "ACCENT": "#b8402a",
         "ACCENT_HOVER": "#9a3421", "ACCENT_SOFT": "#f3dcd2", "ACCENT_SOFT_HOVER": "#ecccbf", "RED": "#b8402a",
         "HOLIDAY_RED": "#b8402a", "HOLIDAY_RED_FADED": "#e6c2b8", "FESTIVAL": "#d9a441", "GRAY": "#6b6257"}},
     "night": {"name": "墨夜（深色）", "fonts": {"serif": True, "title": 22, "heading": 12}, "colors": {
         "BG": "#17191e", "BORDER": "#2f323a", "TEXT": "#ece6da", "EVENT_DOT": "#7fa88f", "PREVIEW_DOT": "#7a5d3a",
         "CARD_BG": "#22252c", "FADED_TEXT": "#55585f", "ON_ACCENT": "#17191e", "SELECTED": "#3a3122",
-        "DIVIDER": "#24272e", "HOVER": "#20232a", "CARD": "#22252c", "ACCENT": "#e8a33d",
+        "DIVIDER": "#24272e", "HOVER": "#20232a", "CARD": "#22252c", "CARD_HOVER": "#2b2f37", "ACCENT": "#e8a33d",
         "ACCENT_HOVER": "#f0b55a", "ACCENT_SOFT": "#3a3122", "ACCENT_SOFT_HOVER": "#4a3d29", "RED": "#ef7a6b",
         "HOLIDAY_RED": "#e58a7e", "HOLIDAY_RED_FADED": "#6b4a47", "FESTIVAL": "#e8a33d", "GRAY": "#9c968b"}},
     "nordic": {"name": "北歐極簡", "fonts": {"serif": False, "title": 22, "heading": 12}, "colors": {
         "BG": "#f3f4f1", "BORDER": "#d9ddd6", "TEXT": "#1c2420", "EVENT_DOT": "#8fb3a0", "PREVIEW_DOT": "#b9d0c1",
         "CARD_BG": "#e9ece6", "FADED_TEXT": "#c2c8c2", "ON_ACCENT": "#ffffff", "SELECTED": "#d8e6dc",
-        "DIVIDER": "#e2e5df", "HOVER": "#eaede7", "CARD": "#ffffff", "ACCENT": "#2f6b4f",
+        "DIVIDER": "#e2e5df", "HOVER": "#eaede7", "CARD": "#ffffff", "CARD_HOVER": "#eef1ec", "ACCENT": "#2f6b4f",
         "ACCENT_HOVER": "#24563f", "ACCENT_SOFT": "#d8e6dc", "ACCENT_SOFT_HOVER": "#c7dbcd", "RED": "#ae4337",
         "HOLIDAY_RED": "#ae4337", "HOLIDAY_RED_FADED": "#e2c3bd", "FESTIVAL": "#d9a441", "GRAY": "#5f6862"}},
 }
@@ -230,6 +231,7 @@ SMALL = (UI_FONT, 8)
 # 標題類字型：有思源宋體（Noto Serif TC）就用襯線字，否則維持正黑體；由 apply_fonts() 於啟動時決定
 SERIF_FAMILIES = ("Noto Serif TC", "Source Han Serif TC")
 TITLE_FONT = (UI_FONT, 15, "bold")         # 頁面大標題（日期、工作詳細資訊）
+HERO_FONT = (UI_FONT, 36, "bold")          # 主畫面的大日期數字（標題字級的 1.8 倍）
 HEADING_FONT = (UI_FONT, 11)               # 月份、清單區塊標題
 SUBJECT_FONT = (UI_FONT, 14, "bold")       # 詳細頁的工作標題輸入框
 ICON_FONT = ("Segoe UI Symbol", 11)
@@ -290,7 +292,7 @@ def apply_fonts(root):
 
     內文（10pt 以下）一律維持正黑體：小字級的中文襯線字筆畫細，在螢幕上不易閱讀。
     """
-    global TITLE_FONT, HEADING_FONT, SUBJECT_FONT, ICON_GLYPH_FONT
+    global TITLE_FONT, HEADING_FONT, SUBJECT_FONT, ICON_GLYPH_FONT, HERO_FONT
     installed = set(tkfont.families(root))
     ICON_GLYPH_FONT = next((name for name in ICON_FAMILIES if name in installed), None)
     serif = next((name for name in SERIF_FAMILIES if name in installed), None)
@@ -303,6 +305,7 @@ def apply_fonts(root):
         TITLE_FONT = (UI_FONT, fonts["title"], "bold")
         HEADING_FONT = (UI_FONT, fonts["heading"], "bold")
         SUBJECT_FONT = (UI_FONT, 14, "bold")
+    HERO_FONT = (TITLE_FONT[0], round(fonts["title"] * 1.8), "bold")
 WEEK_HEAD = "日一二三四五六"   # 月曆以星期日為第一欄
 WEEKDAY_NAME = "一二三四五六日"  # 對應 date.weekday()
 
@@ -2639,6 +2642,12 @@ def day_summary(day, today, task_count, preview_count, event_count, holidays):
     return " · ".join(parts)
 
 
+def relative_day_text(day, today):
+    """大日期旁的說明：今天／明天／昨天／3 天後／5 天前。"""
+    diff = (day - today).days
+    return {0: "今天", 1: "明天", -1: "昨天"}.get(diff) or (f"{diff} 天後" if diff > 0 else f"{-diff} 天前")
+
+
 def due_field(day):
     """Tasks API 的 due 欄位值：只有日期有意義，固定送當天 00:00 UTC；None 表示不排日期。"""
     return f"{day.isoformat()}T00:00:00.000Z" if day else None
@@ -2957,12 +2966,12 @@ class App(tk.Tk):
             self.main_view.pack_forget()
             self._render_new_task()
             self.detail_view.pack(fill="both", expand=True)
-            self.lbl_date.config(text="新增工作")
+            self._show_page_title("新增工作")
         elif self.detail:
             self.main_view.pack_forget()
             self._render_detail()
             self.detail_view.pack(fill="both", expand=True)
-            self.lbl_date.config(text="工作詳細資訊")
+            self._show_page_title("工作詳細資訊")
         else:
             self.redraw()
         if self.borderless:
@@ -3064,19 +3073,31 @@ class App(tk.Tk):
         if self.borderless:
             self.btn_min.pack(side="left")
             btn_close.pack(side="left")
+        # 主畫面：大號日期數字（強調色）＋右邊疊放星期與「今天／明天」，像日曆手帳的封面，一眼看到今天幾號
+        self.hero = tk.Frame(top, bg=BG)
+        self.lbl_day = tk.Label(self.hero, font=HERO_FONT, bg=BG, fg=ACCENT, anchor="w")
+        self.lbl_day.pack(side="left")
+        meta = tk.Frame(self.hero, bg=BG)
+        meta.pack(side="left", padx=(px(12), 0))
+        self.lbl_weekday = tk.Label(meta, font=HEADING_FONT, bg=BG, fg=TEXT, anchor="w")
+        self.lbl_weekday.pack(fill="x")
+        self.lbl_relative = tk.Label(meta, font=SMALL, bg=BG, fg=GRAY, anchor="w")
+        self.lbl_relative.pack(fill="x")
+        # 「下一件」放在大日期右邊當第三行：瞥一眼就知道接下來要做什麼，又不多佔一整列高度
+        # 沒有下一件時收起來；由 _update_next_up() 決定顯示與否
+        self.lbl_next = tk.Label(meta, bg=BG, fg=ACCENT, font=SMALL, anchor="w")
+        # 新增頁、詳細頁：一般的頁面標題
         self.lbl_date = tk.Label(top, font=TITLE_FONT, bg=BG, fg=TEXT, anchor="w")
-        self.lbl_date.pack(fill="x", pady=(0, 0))
+        self.hero.pack(fill="x")
         # 頂部（含日期文字）當拖曳區
-        for widget in (top, tools_row, self.lbl_date):
+        for widget in (top, tools_row, self.lbl_date, self.hero, self.lbl_day, meta,
+                       self.lbl_weekday, self.lbl_relative):
             widget.bind("<Button-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._on_drag)
 
         # 主畫面（月曆＋清單＋輸入列）；點任務時整塊換成詳細頁，比照手機 App
         self.main_view = tk.Frame(self, bg=BG)
         self.detail_view = tk.Frame(self, bg=BG)
-        # 大標題下方一行「下一件」：常駐桌面時瞥一眼就知道接下來要做什麼，不必往下捲清單
-        # 沒有下一件時整行收起來，不佔高度；由 _update_next_up() 決定顯示與否
-        self.lbl_next = tk.Label(self.main_view, bg=BG, fg=ACCENT, font=FONT, anchor="w")
         nav = self.nav = tk.Frame(self.main_view, bg=BG)
         nav.pack(fill="x", padx=px(16), pady=(px(14), px(4)))  # 和標題拉開距離
         # 左：月份標題＋「展開整月／只看這週」（點標題也能切換）；右：上一個／下一個、今天
@@ -3172,7 +3193,7 @@ class App(tk.Tk):
         if self.detail or self.draft:  # 詳細頁／新增頁開啟中：不動編輯中的欄位與標題
             return
         d = self.selected
-        self.lbl_date.config(text=f"{d.month}月{d.day}日 星期{WEEKDAY_NAME[d.weekday()]}")
+        self._show_date_hero(d)
         self.btn_compact.config(text="展開整月 ▾" if self.compact else "只看這週 ▴")
         if self.placeholder_on:  # 提示文字跟著選中的日期變動
             self.entry.delete(0, "end")
@@ -3180,6 +3201,21 @@ class App(tk.Tk):
         self._draw_calendar()
         self._draw_list()
         self._update_next_up()
+
+    def _show_date_hero(self, day):
+        """主畫面標題：大日期數字＋星期＋相對日期。"""
+        self.lbl_date.pack_forget()
+        self.lbl_date.config(text=f"{day.month}月{day.day}日 星期{WEEKDAY_NAME[day.weekday()]}")
+        self.lbl_day.config(text=str(day.day))
+        self.lbl_weekday.config(text=f"星期{WEEKDAY_NAME[day.weekday()]}")
+        self.lbl_relative.config(text=f"{relative_day_text(day, self.today)} · {day.month} 月")
+        self.hero.pack(fill="x")
+
+    def _show_page_title(self, text):
+        """新增頁、詳細頁的標題（取代大日期）。"""
+        self.hero.pack_forget()
+        self.lbl_date.config(text=text)
+        self.lbl_date.pack(fill="x")
 
     def _update_next_up(self):
         """更新「下一件」：只在選中今天時顯示，其他日子留空（摘要是給「現在」用的）。"""
@@ -3190,7 +3226,7 @@ class App(tk.Tk):
             text = next_up_text([(at, title) for at, title in items if at], self._now())
         self.lbl_next.config(text=text)
         if text:
-            self.lbl_next.pack(fill="x", padx=px(18), pady=(px(2), 0), before=self.nav)
+            self.lbl_next.pack(fill="x", pady=(px(2), 0))
         else:
             self.lbl_next.pack_forget()
 
@@ -3344,12 +3380,15 @@ class App(tk.Tk):
 
     def _preview_card(self, task):
         """重複待辦預定的一期：灰色、沒有完成圓圈（還沒建立，不能勾選），點了開啟這筆重複待辦。"""
-        row = tk.Frame(self.list_frame, bg=BG, cursor="hand2")
-        row.pack(fill="x", pady=(px(2), 0))
+        # 只有外框的空心卡片：和實心的待辦卡片區隔，表示這一期還沒建立
+        box = RoundedBox(self.list_frame, fill=BG, outline=BORDER, radius=12, padx=12, pady=4)
+        box.pack(fill="x", padx=(0, px(2)), pady=(0, px(6)))
+        row = box.inner
+        row.config(cursor="hand2")
         icon = tk.Label(row, text="🔁", bg=BG, fg=PREVIEW_DOT, font=FONT, width=2, cursor="hand2")
-        icon.pack(side="left", padx=(px(4), px(10)), pady=px(6))
+        icon.pack(side="left", padx=(0, px(10)), pady=px(4))
         text = tk.Frame(row, bg=BG, cursor="hand2")
-        text.pack(side="left", fill="x", expand=True, pady=px(6))
+        text.pack(side="left", fill="x", expand=True, pady=px(4))
         title = tk.Label(text, text=task["title"], bg=BG, fg=GRAY, font=FONT, anchor="w", cursor="hand2")
         title.pack(fill="x")
         at = time_text(task.get("time"))
@@ -3357,9 +3396,8 @@ class App(tk.Tk):
         subtitle = " · ".join(p for p in ("預定", f"⏰ {at}" if at else "", f"🔁 {format_recur(task['recur'])}",
                                           task["list_title"]) if p)
         tk.Label(text, text=subtitle, bg=BG, fg=GRAY, font=SMALL, anchor="w", cursor="hand2").pack(fill="x")
-        tk.Frame(self.list_frame, bg=DIVIDER, height=1).pack(fill="x")
         tip = f"完成 {current} 那一期後，才會建立這一期（點一下開啟這筆重複待辦）"
-        for widget in (row, icon, text, *text.winfo_children()):
+        for widget in (box, row, icon, text, *text.winfo_children()):
             widget.bind("<Button-1>", lambda e: self.open_detail(task))
             Tooltip(widget, tip)
 
@@ -3441,46 +3479,48 @@ class App(tk.Tk):
                        at_fg=RED if is_late(child, now) else GRAY)
 
     def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None):
-        """清單中的一列（扁平樣式，比照 Google Tasks：無外框，列與列之間以細線分隔）。
+        """清單中的一筆：圓角卡片浮在底色上，卡片之間留空隙（取代分隔線）；滑過時卡片變色。
 
-        task 為 None 時是日曆行程：左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
+        task 為 None 時是日曆行程：卡片左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
         at＝右側時間欄文字（14:00、全天）；行程與待辦的時間都靠右對齊，掃一眼就能讀出順序。
         """
         subtitle_fg, at_fg = subtitle_fg or GRAY, at_fg or GRAY
-        row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(44))
-        row.pack(fill="x", padx=(CHILD_INDENT if indent else 0, 0))
-        inner = tk.Frame(row, bg=BG)
+        row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(50))
+        row.pack(fill="x", padx=(CHILD_INDENT if indent else 0, px(2)))
+        row.card_fill = CARD
+        inner = tk.Frame(row, bg=CARD)
         if task:
-            circle = self._check_circle(inner, task, bg=BG)
+            circle = self._check_circle(inner, task, bg=CARD)
             circle.pack(side="left", padx=(0, px(10)))
             count = len(self._children(task))
             Tooltip(circle, f"標記為完成（含 {count} 個子工作）" if count else "標記為完成")
         else:
             # 行程沒有完成圓圈；留同寬的空位，標題才會和待辦對齊
-            spacer = tk.Frame(inner, bg=BG, width=px(22), height=px(22))
+            spacer = tk.Frame(inner, bg=CARD, width=px(22), height=px(22))
             spacer.pack(side="left", padx=(0, px(10)))
             Tooltip(row, "Google 日曆行程（唯讀，請到日曆 App 修改）")
         lbl_at = None
         if at:  # 時間欄先 pack，標題太長時被壓縮的是標題而不是時間
-            lbl_at = tk.Label(inner, text=at, bg=BG, fg=at_fg, font=EVENT_TIME_FONT, anchor="e")
+            lbl_at = tk.Label(inner, text=at, bg=CARD, fg=at_fg, font=EVENT_TIME_FONT, anchor="e")
             lbl_at.pack(side="right", anchor="n", padx=(px(8), px(4)), pady=(px(2), 0))
-        text = tk.Frame(inner, bg=BG)
+        text = tk.Frame(inner, bg=CARD)
         text.pack(side="left", fill="x", expand=True)
-        lbl_title = tk.Label(text, text=title, bg=BG, fg=TEXT, font=FONT, anchor="w", justify="left")
+        lbl_title = tk.Label(text, text=title, bg=CARD, fg=TEXT, font=FONT, anchor="w", justify="left")
         lbl_title.pack(fill="x")
         preview = _notes_preview(task.get("notes", "")) if task else ""
         if preview:  # 比照 Google Tasks：標題下方顯示詳細資訊第一行
-            tk.Label(text, text=preview, bg=BG, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
+            tk.Label(text, text=preview, bg=CARD, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
         if subtitle:
-            tk.Label(text, text=subtitle, bg=BG, fg=subtitle_fg, font=SMALL, anchor="w").pack(fill="x")
-        window = row.create_window(px(4), px(6), window=inner, anchor="nw")
+            tk.Label(text, text=subtitle, bg=CARD, fg=subtitle_fg, font=SMALL, anchor="w").pack(fill="x")
+        pad_x, pad_y, gap = px(12), px(8), px(6)  # 卡片內距；gap＝卡片之間的空隙（不畫卡片）
+        window = row.create_window(pad_x, pad_y, window=inner, anchor="nw")
         if task:  # 點整列（圓圈以外）開啟詳細頁；按右鍵開快速選單（改日期、完成）
             for widget in (row, inner, text, *text.winfo_children(), *([lbl_at] if lbl_at else [])):
                 widget.bind("<Button-1>", lambda e: self.open_detail(task))
                 widget.bind("<Button-3>", lambda e: self._popup_task_menu(task, e))
                 widget.config(cursor="hand2")
-        # 滑鼠移過整列時淡淡變色，提示可以點
-        row.bind("<Enter>", lambda e: _set_bg(row, HOVER))
+        # 滑鼠移過時卡片變色，提示可以點
+        row.bind("<Enter>", lambda e: self._paint_card(row, CARD_HOVER))
         # 滑鼠可能從列內的文字直接移出去，此時只有子元件收到 Leave，所以每個子元件都要檢查
         for widget in (row, *_descendants(row)):
             widget.bind("<Leave>", lambda e: self._leave_row(row, e), add="+")
@@ -3489,22 +3529,34 @@ class App(tk.Tk):
             width = row.winfo_width()
             if width < px(50):
                 return
-            lbl_title.config(wraplength=width - px(60) - (lbl_at.winfo_reqwidth() + px(12) if lbl_at else 0))
-            row.itemconfigure(window, width=width - px(8))
+            lbl_title.config(wraplength=width - px(72) - (lbl_at.winfo_reqwidth() + px(12) if lbl_at else 0))
+            row.itemconfigure(window, width=width - 2 * pad_x)
             inner.update_idletasks()
-            height = inner.winfo_reqheight() + px(12)
+            height = inner.winfo_reqheight() + 2 * pad_y + gap
             row.config(height=height)  # 高度不變時不會再觸發 <Configure>，不會無限迴圈
+            row.card_size = (width, height - gap)
+            self._paint_card(row, row.card_fill)
             row.delete("deco")
-            row.create_line(0, height - 1, width, height - 1, fill=DIVIDER, tags="deco")
-            if task is None:  # 行程左側色條，和可勾選的待辦區隔
-                row.create_rectangle(0, px(8), px(3), height - px(8), fill=EVENT_DOT, outline="", tags="deco")
+            if task is None:  # 行程：卡片左側色條，和可勾選的待辦區隔
+                row.create_rectangle(px(5), px(12), px(8), height - gap - px(12), fill=EVENT_DOT, outline="",
+                                     tags="deco")
         row.bind("<Configure>", relayout)
 
+    def _paint_card(self, row, fill):
+        """重畫卡片底色（圓角）並把卡片內容的底色一起換掉。"""
+        row.card_fill = fill
+        size = getattr(row, "card_size", None)
+        if size:
+            draw_rounded(row, size[0], size[1], px(12), fill, BG, tag="card")
+            row.tag_lower("card")
+        for child in row.winfo_children():
+            _set_bg(child, fill)
+
     def _leave_row(self, row, event):
-        """滑鼠離開整列才恢復底色（移到列內的子元件不算離開）。"""
+        """滑鼠離開整張卡片才恢復底色（移到卡片內的子元件不算離開）。"""
         x, y = event.x_root - row.winfo_rootx(), event.y_root - row.winfo_rooty()
         if not (0 <= x < row.winfo_width() and 0 <= y < row.winfo_height()):
-            _set_bg(row, BG)
+            self._paint_card(row, CARD)
 
     def _check_circle(self, parent, task, bg=None):
         """To Do 風格的圓圈：滑鼠移上去顯示 ✓，點擊後填滿並標記完成。"""
@@ -3585,7 +3637,7 @@ class App(tk.Tk):
         self.main_view.pack_forget()
         self._render_new_task()
         self.detail_view.pack(fill="both", expand=True)
-        self.lbl_date.config(text="新增工作")
+        self._show_page_title("新增工作")
         self.draft_title.focus_force()
 
     def _render_new_task(self):
@@ -3783,7 +3835,7 @@ class App(tk.Tk):
         self.main_view.pack_forget()
         self._render_detail()
         self.detail_view.pack(fill="both", expand=True)
-        self.lbl_date.config(text="工作詳細資訊")
+        self._show_page_title("工作詳細資訊")
 
     def _render_detail(self):
         view = self.detail_view

@@ -1432,6 +1432,45 @@ class CalendarTest(AppTestCase):
         # Then: 收起
         self.assertIsNone(app.cal_tooltip.tip)
 
+    def test_date_hero_and_page_title(self):
+        """主畫面顯示大日期（數字＋星期＋今天）；打開新增頁 > 改成頁面標題；返回 > 大日期回來"""
+        # Given: 已啟動
+        app = self.start()
+        # Then: 大日期
+        self.assertEqual(app.lbl_day.cget("text"), str(self.today.day))
+        self.assertEqual(app.lbl_relative.cget("text"), f"今天 · {self.today.month} 月")
+        self.assertTrue(app.hero.winfo_ismapped())
+        # When: 打開新增頁
+        app.open_new_task()
+        app.update()
+        # Then: 頁面標題
+        self.assertFalse(app.hero.winfo_ismapped())
+        self.assertTrue(app.lbl_date.winfo_ismapped())
+        # When: 返回
+        app.cancel_new_task(ask=False)
+        app.update()
+        # Then: 大日期回來
+        self.assertTrue(app.hero.winfo_ismapped())
+
+    def test_task_card_hover(self):
+        """滑鼠移到待辦卡片 > 卡片與內容換成滑過色；移開 > 恢復"""
+        # Given: 今天一筆任務
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        app.update()
+        label = find_label(app.list_frame, "寫週報")
+        row = label.master.master.master  # Label → 文字區 → 卡片內容 → 卡片 Canvas
+        # When: 滑鼠移入
+        row.event_generate("<Enter>")
+        app.update()
+        # Then: 滑過色
+        self.assertEqual(label.cget("bg"), daynote.CARD_HOVER)
+        # When: 移出（座標在卡片外）
+        row.event_generate("<Leave>", x=-5, y=-5)
+        app._paint_card(row, daynote.CARD)  # 測試環境的 Leave 不帶螢幕座標，直接呼叫恢復
+        # Then: 恢復卡片色
+        self.assertEqual(label.cget("bg"), daynote.CARD)
+
     def test_keyboard_navigation(self):
         """方向鍵與 Home > 前後一天、前後一週、回到今天"""
         # Given: 月曆取得焦點

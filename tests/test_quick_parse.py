@@ -362,6 +362,21 @@ class SnoozeOptionsTest(unittest.TestCase):
         ])
 
 
+class RelativeDayTest(unittest.TestCase):
+    """大日期旁的相對日期（relative_day_text）。"""
+
+    def test_cases(self):
+        """今天、明天、昨天、幾天後、幾天前"""
+        cases = {0: "今天", 1: "明天", -1: "昨天", 3: "3 天後", -5: "5 天前"}
+        for offset, expected in cases.items():
+            with self.subTest(offset=offset):
+                # Given: 和今天差 offset 天
+                # When: 產生說明
+                result = daynote.relative_day_text(TODAY + dt.timedelta(days=offset), TODAY)
+                # Then: 文字正確
+                self.assertEqual(result, expected)
+
+
 class NextUpTest(unittest.TestCase):
     """大標題下方的「下一件」摘要（next_up_text）。"""
 
