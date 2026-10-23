@@ -99,6 +99,7 @@ UI_FONT = "Microsoft JhengHei UI"
 EVENT_TIME_FONT = (UI_FONT, 9, "bold")
 UNDO_SECONDS = 5
 REMINDER_CHECK_MS = 30 * 1000    # 每 30 秒檢查一次提醒
+CLOSE_WAIT_SEC = 15              # 關閉時等待修改送到 Google 的上限；超過就不再等（畫面不會因斷線卡住）
 REMINDER_SNOOZE_MIN = 10
 REMINDER_SNOOZE_MORE_MIN = (30, 60)    # 延後下拉選單的其他選項（分鐘）
 REMINDER_TOMORROW_AT = dt.time(9, 0)   # 延後下拉選單「明天早上」的時間
@@ -3176,12 +3177,28 @@ class App(tk.Tk):
             self.iconify()
 
     def close(self, ask=True):
-        """關閉 DayNote；詳細頁有未儲存的修改時先處理（ask=False：不詢問直接儲存，用於被新開的 DayNote 取代）。"""
-        if not self._flush_detail_on_close(ask):
+        """關閉 DayNote；詳細頁有未儲存的修改時先處理（ask=False：不詢問直接儲存，用於被新開的 DayNote 取代）。
+
+        還在背景送出的修改（剛完成、剛改日期…）會先等它送完再結束，最多 CLOSE_WAIT_SEC 秒；
+        等待期間視窗先藏起來，使用者感覺是立刻關閉。
+        """
+        if getattr(self, "_closing", False):  # 等待儲存期間又按了一次關閉
             return
-        if not self.cancel_new_task(ask=ask):  # 新增頁還沒建立的內容：詢問是否放棄
-            return
+        self._closing = True
+        try:
+            if not self._flush_detail_on_close(ask):
+                return
+            if not self.cancel_new_task(ask=ask):  # 新增頁還沒建立的內容：詢問是否放棄
+                return
+        finally:
+            self._closing = False
+        self._closing = True  # 確定要關閉了，之後不再接受第二次關閉
         self._save_window_state()
+        if self.pending_writes:
+            self.withdraw()
+            ok = self._pump_until(lambda: not self.pending_writes, CLOSE_WAIT_SEC)
+            if not ok:
+                log.warning("Closed before pending writes finished: pending=%d", self.pending_writes)
         for hotkey_id in self.hotkeys_registered:
             win_unregister_hotkey(self, hotkey_id)
         self.hotkeys_registered.clear()
@@ -3283,7 +3300,8 @@ class App(tk.Tk):
     def _flush_detail_on_close(self, ask=True):
         """關閉前若詳細頁有未儲存的修改：詢問儲存／不儲存／取消。可以繼續關閉時回傳 True。
 
-        儲存必須同步送出：背景執行緒是 daemon，程式結束時會被中止，修改可能根本沒送到 Google。
+        儲存要等送完才繼續關閉（背景執行緒是 daemon，程式結束時會被中止，修改可能根本沒送到 Google）；
+        送出改在非 daemon 執行緒，等待期間畫面照常更新，斷線時最多等 CLOSE_WAIT_SEC 秒。
         """
         if not self.detail:
             return True
@@ -3300,12 +3318,45 @@ class App(tk.Tk):
             if not answer:
                 return True
         try:
-            self.g.update_task(task["list_id"], task["id"], fields)
+            self._wait_in_background(lambda: self.g.update_task(task["list_id"], task["id"], fields),
+                                     CLOSE_WAIT_SEC)
         except (ApiError, NeedLogin) as e:
             if not ask:
                 return True  # 被取代時無法詢問，只能放棄這次修改
             messagebox.showerror("儲存失敗", f"{e}\n\n修改尚未儲存，DayNote 先不關閉。", parent=self)
             return False
+        return True
+
+    def _wait_in_background(self, work, timeout):
+        """在非 daemon 執行緒執行 work() 並等它完成，等待期間畫面照常更新（不會「沒有回應」）。
+
+        @return work() 的回傳值
+        @raise work() 拋出的例外；超過 timeout 秒時拋出 ApiError（工作仍會在背景做完）
+        """
+        outcome = {}
+
+        def runner():
+            try:
+                outcome["result"] = work()
+            except Exception as e:  # 交回主執行緒處理
+                outcome["error"] = e
+        thread = threading.Thread(target=runner)  # 非 daemon：程式結束前會等它送完
+        thread.start()
+        self._set_status("儲存中…")
+        if not self._pump_until(lambda: not thread.is_alive(), timeout):
+            raise ApiError(f"連線逾時（超過 {timeout} 秒）")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome.get("result")
+
+    def _pump_until(self, done, timeout):
+        """處理畫面事件直到 done() 成立或超過 timeout 秒。@return 是否在時限內完成"""
+        deadline = time.time() + timeout
+        while not done():
+            if time.time() >= deadline:
+                return False
+            self.update()
+            time.sleep(0.02)
         return True
 
     def _icon_button(self, parent, text, command, font=ICON_FONT, tip=None):

@@ -1631,6 +1631,23 @@ class DetailTest(AppTestCase):
         self.assertEqual(self.dialogs[-1][0], "askyesnocancel")
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "state.json")))
 
+    def test_close_waits_for_pending_completion(self):
+        """剛完成待辦、還在送出時就關閉 > 等送到 Google 才結束，完成不會遺失"""
+        # Given: 完成要 0.5 秒才送到
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        original = self.g.complete_task
+
+        def slow(*args):
+            time.sleep(0.5)
+            original(*args)
+        self.g.complete_task = slow
+        app.complete(app.tasks[0])
+        # When: 立刻關閉
+        app.close(ask=False)
+        # Then: 關閉返回時 Google 上已完成
+        self.assertEqual(self.g.tasks[task_id]["status"], "completed")
+
 
 # ---------------------------------------------------------------- 月曆與清單顯示
 

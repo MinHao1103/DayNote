@@ -2,6 +2,8 @@
 
 執行方式（在 DayNote 根目錄）：python -m unittest discover -s tests -t . -v
 """
+import threading
+import time
 import unittest
 import unittest.mock
 
@@ -12,6 +14,8 @@ class FakeCloser:
     """借用 App._flush_detail_on_close；詳細頁的修改以 pending_fields 模擬。"""
 
     _flush_detail_on_close = daynote.App._flush_detail_on_close
+    _wait_in_background = daynote.App._wait_in_background
+    _pump_until = daynote.App._pump_until
 
     def __init__(self, fields, google=None):
         self.detail = {"task": make_task()}
@@ -20,6 +24,12 @@ class FakeCloser:
 
     def _detail_changes(self):
         return dict(self.pending_fields)
+
+    def update(self):
+        pass  # 沒有視窗，等待期間不需要處理畫面事件
+
+    def _set_status(self, text):
+        pass
 
 
 class FlushDetailOnCloseTest(unittest.TestCase):
@@ -55,7 +65,7 @@ class FlushDetailOnCloseTest(unittest.TestCase):
         with unittest.mock.patch.object(daynote.messagebox, "askyesnocancel", return_value=True):
             # When: 關閉並選擇儲存
             result = closer._flush_detail_on_close()
-        # Then: 已送出（呼叫返回前就完成，不經背景執行緒）
+        # Then: 已送出（等送完才返回，關閉後不會遺失）
         self.assertTrue(result)
         self.assertEqual([("update_task", ("L1", "t1", {"title": "新標題"}), {})], closer.g.calls)
 
@@ -115,6 +125,24 @@ class FlushDetailOnCloseTest(unittest.TestCase):
         # Then: 關閉、不跳錯誤視窗
         self.assertTrue(result)
         error.assert_not_called()
+
+    def test_save_timeout_stays_open(self):
+        """斷線時儲存一直沒回應 > 超過等待上限就顯示錯誤並不關閉，畫面不會一直卡住"""
+        # Given: PATCH 要很久才回來，等待上限縮短為 0.2 秒
+        closer = FakeCloser({"title": "新標題"})
+        slow = threading.Event()
+        closer.g.update_task = lambda *args: slow.wait(2)
+        with unittest.mock.patch.object(daynote, "CLOSE_WAIT_SEC", 0.2), \
+                unittest.mock.patch.object(daynote.messagebox, "askyesnocancel", return_value=True), \
+                unittest.mock.patch.object(daynote.messagebox, "showerror") as error:
+            # When: 關閉並選擇儲存
+            started = time.time()
+            result = closer._flush_detail_on_close()
+        slow.set()  # 放掉背景執行緒
+        # Then: 很快返回、不關閉、有錯誤提示
+        self.assertLess(time.time() - started, 1.5)
+        self.assertFalse(result)
+        self.assertIn("連線逾時", str(error.call_args))
 
 
 if __name__ == "__main__":
