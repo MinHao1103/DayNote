@@ -118,12 +118,13 @@ HELP_SHORTCUTS = (
     ("Home", "回到今天"),
     ("F5", "立即同步"),
     ("Esc", "離開詳細頁（有修改會自動儲存）"),
+    ("Ctrl + Z", "復原剛才的動作（完成、改日期、刪除）"),
     ("F1", "開啟這個說明"),
 )
 HELP_TIPS = (
     "輸入框可以一次寫完：明天 3點 開會 每週二 #工作",
     "點圓圈完成待辦，5 秒內可以按「復原」",
-    "在待辦上按右鍵：移到今天、明天或不排日期",
+    "在待辦上按右鍵：改日期、完成、刪除",
     "滑鼠停在月曆日期上，看當天有幾件待辦、幾個行程",
     "按月份旁的「展開整月」看整個月",
     "右上角月亮／太陽切換深色、淺色；「⋯」→「風格」有更多配色",
@@ -1150,13 +1151,10 @@ def mark_past_reminder(reminded, task, now):
 
 
 def delete_prompt(task, child_count):
-    """刪除確認文字；週期任務會提醒「不會再產生下一期」並引導改用略過。"""
+    """週期待辦的刪除確認文字：提醒「不會再產生下一期」並引導改用略過（一般待辦不確認，刪除後可以復原）。"""
     extra = f"\n（含 {child_count} 個子工作）" if child_count else ""
-    text = f"確定要刪除「{task['title']}」？{extra}\n\n刪除後無法在 DayNote 復原。"
-    if can_skip(task):
-        text = (f"這是重複任務（🔁 {format_recur(task['recur'])}），刪除後不會再產生下一期。\n"
-                f"只想跳過這次，請改用「略過這一期」。\n\n{text}")
-    return text
+    return (f"這是重複任務（🔁 {format_recur(task['recur'])}），刪除後不會再產生下一期。\n"
+            f"只想跳過這次，請改用「略過這一期」。\n\n確定要刪除「{task['title']}」？{extra}")
 
 
 def task_subtitle(task, today):
@@ -2840,6 +2838,7 @@ class App(tk.Tk):
         self.undo_group = None
         self.undo_job = None
         self.undo_action = None     # 其他可復原的動作（例如改日期）：按「復原」時呼叫
+        self.pending_delete = None  # 等待中的刪除 {"group", "job"}：復原時間過了才送到 Google
         self.new_due = self.today   # 新增工作的預設日期，跟著月曆選中的日期
         self.list_index = -1        # 新增工作預設放進的清單（self.lists 的索引；-1＝尚未讀到清單）
         self.draft = None           # 新增頁（點「詳細」）編輯中的內容
@@ -3043,6 +3042,7 @@ class App(tk.Tk):
             self._closing = False
         self._closing = True  # 確定要關閉了，之後不再接受第二次關閉
         self._save_window_state()
+        self._commit_delete()  # 還在復原時間內的刪除：關閉前送出
         if self.pending_writes:
             self.withdraw()
             ok = self._pump_until(lambda: not self.pending_writes, CLOSE_WAIT_SEC)
@@ -4295,18 +4295,55 @@ class App(tk.Tk):
 
     def delete_detail(self):
         task = self.detail["task"]
-        children = [] if task.get("parent") else self._children(task)
-        if not messagebox.askyesno("刪除工作", delete_prompt(task, len(children)), parent=self, icon="warning",
-                                   yes="刪除", no="取消"):
+        if not self._confirm_delete(task):
             return
         self.detail = None
         self.detail_view.pack_forget()
         self.main_view.pack(fill="both", expand=True)
-        group = children + [task]  # 先刪子工作再刪父工作，不依賴 API 是否連帶刪除
+        self.delete_task(task, confirmed=True)
+
+    def _confirm_delete(self, task):
+        """週期待辦刪除前詢問（刪了就不會再有下一期，引導改用略過）；一般待辦不詢問，刪除後可以復原。"""
+        if not can_skip(task):
+            return True
+        children = [] if task.get("parent") else self._children(task)
+        return messagebox.askyesno("刪除工作", delete_prompt(task, len(children)), parent=self, icon="warning",
+                                   yes="刪除", no="取消")
+
+    def delete_task(self, task, confirmed=False):
+        """刪除待辦（含子工作）：先從畫面拿掉，狀態列提供「復原」；UNDO_SECONDS 秒後才真的從 Google 刪除。
+
+        還沒送出前又刪了別筆、關閉 DayNote 或登出時，會先把等待中的刪除送出。
+        """
+        if task not in self.tasks or not (confirmed or self._confirm_delete(task)):
+            return
+        self._commit_delete()  # 上一筆等待中的刪除先送出，一次只保留一筆可復原
+        group = ([] if task.get("parent") else self._children(task)) + [task]  # 先刪子工作再刪父工作
         for t in group:
             if t in self.tasks:
                 self.tasks.remove(t)
         self.redraw()
+        job = self.after(UNDO_SECONDS * 1000, self._commit_delete)
+        self.pending_delete = {"group": group, "job": job}
+        self._offer_undo_action(f"已刪除「{task['title']}」", self._restore_delete)
+
+    def _restore_delete(self):
+        """「復原」刪除：還沒送到 Google，取消等待並放回清單。"""
+        pending, self.pending_delete = self.pending_delete, None
+        if not pending:
+            return
+        self.after_cancel(pending["job"])
+        self.tasks.extend(pending["group"])
+        self._set_status(f"已復原「{pending['group'][-1]['title']}」")
+        self.redraw()
+
+    def _commit_delete(self):
+        """把等待中的刪除送到 Google；失敗就顯示錯誤並重新同步（可能只刪了一部分）。"""
+        pending, self.pending_delete = self.pending_delete, None
+        if not pending:
+            return
+        self.after_cancel(pending["job"])
+        group = pending["group"]
 
         def work():
             for t in group:
@@ -4315,9 +4352,7 @@ class App(tk.Tk):
         def done(_, err):
             if err:
                 self._show_error(err)
-                self.refresh()  # 可能只刪了一部分，重新同步以 Google 上的實際狀態為準
-            else:
-                self._set_status(f"已刪除「{task['title']}」")
+                self.refresh()
         self.run_write(work, done)
 
     def add_subtask(self, parent, title):
@@ -4567,6 +4602,9 @@ class App(tk.Tk):
         self.bind("<Control-N>", lambda e: self.detail or self.draft or self.entry.focus_force())
         self.bind("<F5>", lambda e: self.refresh())
         self.bind("<F1>", lambda e: self.open_help())
+        # Ctrl+Z 等同按狀態列的「復原」；輸入框裡保留文字本身的復原
+        for key in ("<Control-z>", "<Control-Z>"):
+            self.bind(key, lambda e: None if isinstance(self.focus_get(), (tk.Entry, tk.Text)) else self.undo())
         for key, days in (("<Left>", -1), ("<Right>", 1), ("<Up>", -7), ("<Down>", 7)):
             self.bind(key, lambda e, d=days: self._shift_day(d))
         self.bind("<Home>", lambda e: self._shift_day(None))
@@ -4686,6 +4724,7 @@ class App(tk.Tk):
                                    "之後需要重新登入。", parent=self, icon="warning", yes="登出", no="取消"):
             return
         self.close_detail()  # 詳細頁有修改時先儲存
+        self._commit_delete()  # 還在復原時間內的刪除：登出前送出
         self.cancel_new_task(ask=False)  # 已確認登出，新增頁一併關閉
         self.busy = True
         self._set_status("正在登出…")
@@ -4793,6 +4832,9 @@ class App(tk.Tk):
                 self.after_idle(self.refresh)
             return
         view, self.lists, self.tasks, self.events, self.holidays, mark, self.done_today = result
+        if self.pending_delete:  # 還在復原時間內的刪除尚未送到 Google，同步讀到的不要放回畫面
+            deleting = {t["id"] for t in self.pending_delete["group"]}
+            self.tasks = [t for t in self.tasks if t["id"] not in deleting]
         if self.detail:
             self.detail["task"] = self._find_task(self.detail["task"]["id"]) or self.detail["task"]
         self.backfill_since = mark
@@ -4823,21 +4865,32 @@ class App(tk.Tk):
                 self._set_status(self.synced_text)
         self.after(FIRST_RUN_TIP_MS, restore)
 
-    def _build_task_menu(self, task):
-        """待辦的右鍵選單：改日期（今天／明天／不排日期）、完成、開啟詳細資訊。子工作跟著父任務，不提供改日期。"""
+    def _build_task_menu(self, task, anchor=None):
+        """待辦的右鍵選單：改日期（今天／明天／不排日期／選日期…）、完成、開啟詳細資訊、刪除。
+
+        子工作跟著父任務，不提供改日期。anchor＝「選日期…」的選擇器要對齊的元件（按右鍵的那張卡片）。
+        """
         menu = PopupMenu(self)
         if not self._is_child(task):
             today = self.today
             for label, day in (("移到今天", today), ("移到明天", today + dt.timedelta(days=1)), ("不排日期", None)):
                 menu.add_command(label=label, command=lambda d=day: self.reschedule([task], d),
                                  state="disabled" if task["due"] == day else "normal")
+            menu.add_command(label="選日期…", command=lambda: self._pick_task_date(task, anchor))
             menu.add_separator()
-        menu.add_command(label="✓ 完成", command=lambda: self.complete(task))
+        menu.add_command(label="完成", command=lambda: self.complete(task))
         menu.add_command(label="開啟詳細資訊", command=lambda: self.open_detail(task))
+        menu.add_separator()
+        menu.add_command(label="刪除", command=lambda: self.delete_task(task))
         return menu
 
+    def _pick_task_date(self, task, anchor):
+        """右鍵「選日期…」：在卡片旁開日期選擇器，選了就改日期（可復原）。"""
+        anchor = anchor if anchor is not None and anchor.winfo_exists() else self.list_canvas
+        self.task_date_picker = DatePicker(self, anchor, task["due"], lambda day: self.reschedule([task], day))
+
     def _popup_task_menu(self, task, event):
-        self.task_menu = self._build_task_menu(task)
+        self.task_menu = self._build_task_menu(task, event.widget)
         self.task_menu.tk_popup(event.x_root, event.y_root)
 
     def _is_child(self, task):

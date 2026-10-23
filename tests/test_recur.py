@@ -838,6 +838,10 @@ class FakeApp:
     complete = daynote.App.complete
     undo_complete = daynote.App.undo_complete
     delete_detail = daynote.App.delete_detail
+    delete_task = daynote.App.delete_task
+    _confirm_delete = daynote.App._confirm_delete
+    _commit_delete = daynote.App._commit_delete
+    _restore_delete = daynote.App._restore_delete
     _children = daynote.App._children
     _add_spawned = getattr(daynote.App, "_add_spawned", None)
     _drop_done = daynote.App._drop_done
@@ -857,6 +861,7 @@ class FakeApp:
         self.pending_fields = {}     # 詳細頁尚未儲存的修改（API 欄位格式）
         self.reminded, self.snoozed = set(), {}
         self.done_today = []         # 今天完成的任務（「已完成」區塊）
+        self.pending_delete = None   # 等待中的刪除（復原時間過了才送出）
         self.reminder_saves = 0
         self.before_done = None      # 模擬背景工作完成、回呼執行前插入的事件（例如同步）
 
@@ -896,6 +901,15 @@ class FakeApp:
             on_done(result, None)
 
     run_write = run_bg  # 寫入與讀取在替身裡都同步執行；寫入期間同步的處理由 GUI 測試涵蓋
+
+    def after(self, ms, func):
+        return f"job-{ms}"  # 不自動執行；延後刪除由測試呼叫 _commit_delete 觸發
+
+    def after_cancel(self, job):
+        pass
+
+    def _offer_undo_action(self, text, action):
+        self.statuses.append(text)
 
     def redraw(self):
         pass
@@ -1491,24 +1505,6 @@ class SkipFlowTest(unittest.TestCase):
 
 class DeletePromptTest(unittest.TestCase):
 
-    def test_plain_task_unchanged(self):
-        """刪除一般任務 > 確認文字與現行版本相同"""
-        # Given: 一般任務
-        task = make_task()
-        # When: 產生確認文字
-        result = need("delete_prompt")(task, 0)
-        # Then: 與現行文字一致
-        self.assertEqual("確定要刪除「繳費」？\n\n刪除後無法在 DayNote 復原。", result)
-
-    def test_plain_task_with_children_unchanged(self):
-        """刪除有子工作的一般任務 > 確認文字與現行版本相同"""
-        # Given: 一般任務
-        task = make_task()
-        # When: 產生確認文字（含 2 個子工作）
-        result = need("delete_prompt")(task, 2)
-        # Then: 與現行文字一致
-        self.assertEqual("確定要刪除「繳費」？\n（含 2 個子工作）\n\n刪除後無法在 DayNote 復原。", result)
-
     def test_recurring_task(self):
         """刪除重複任務 > 提示規則、不會再產生下一期、引導改用略過"""
         # Given: 週報
@@ -1539,8 +1535,9 @@ class DeleteFlowTest(unittest.TestCase):
         app = FakeApp([task])
         app.detail = {"task": task}
         with unittest.mock.patch.object(daynote.messagebox, "askyesno", return_value=True) as ask:
-            # When: 按刪除並確認
+            # When: 按刪除並確認，復原時間過了
             app.delete_detail()
+            app._commit_delete()
         # Then: 只有 delete_task，確認框使用重複任務的文字
         self.assertEqual(["delete_task"], app.g.names())
         self.assertEqual([], app.tasks)

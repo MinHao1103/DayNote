@@ -477,7 +477,7 @@ class StartupTest(AppTestCase):
         shown = texts(app.help_win)
         self.assertIn("Ctrl + Alt + D", shown)
         self.assertIn("F8", shown)
-        self.assertIn("・在待辦上按右鍵：移到今天、明天或不排日期", shown)
+        self.assertIn("・在待辦上按右鍵：改日期、完成、刪除", shown)
         # When: 按完整說明
         with unittest.mock.patch.object(daynote.webbrowser, "open", lambda url: opened.append(url)):
             click(app.btn_help_more)
@@ -1468,35 +1468,124 @@ class DetailTest(AppTestCase):
                             for t in self.g.by_title("吃藥")))
         self.assertTrue(self.status().startswith("已略過"))
 
-    def test_delete_with_confirm(self):
-        """刪除並確認 > 任務與子工作都刪除"""
-        # Given: 有子工作的任務
+    def test_delete_waits_for_undo_window(self):
+        """刪除一般待辦 > 不詢問、立刻從畫面消失；復原時間過了才從 Google 刪除（含子工作）"""
+        # Given: 有子工作的任務，復原時間縮短為 1 秒
         parent = self.g.seed("搬家", self.today)
         child = self.g.seed("打包", None, parent=parent)
         app = self.start()
-        # When: 刪除並確認
         self.open("搬家")
-        click(find_label(app.detail_view, "刪除"))
-        settle(app)
+        with unittest.mock.patch.object(daynote, "UNDO_SECONDS", 1):
+            # When: 刪除
+            click(find_label(app.detail_view, "刪除"))
+            app.update()
+            # Then: 沒有詢問、畫面已拿掉、Google 上還在、狀態列可復原
+            self.assertEqual([d for d in self.dialogs if d[0] == "askyesno"], [])
+            self.assertNotIn("搬家", self.list_texts())
+            self.assertNotIn("delete_task", self.g.calls)
+            self.assertEqual(self.status(), "已刪除「搬家」")
+            self.assertTrue(app.btn_undo.winfo_ismapped())
+            # When: 復原時間過了
+            pump(app, 1.3)
+            settle(app)
         # Then: 都刪除
         self.assertTrue(self.g.tasks[parent].get("deleted"))
         self.assertTrue(self.g.tasks[child].get("deleted"))
-        self.assertEqual(self.status(), "已刪除「搬家」")
-        self.assertIn("1 個子工作", self.dialogs[-1][2])
 
-    def test_delete_cancelled(self):
-        """刪除時按否 > 不刪除，停在詳細頁"""
-        # Given: 一筆任務
+    def test_delete_undo(self):
+        """刪除後按「復原」 > 回到清單，Google 上不會被刪"""
+        # Given: 剛刪除一筆
         self.g.seed("寫週報", self.today)
+        app = self.start()
+        self.open("寫週報")
+        click(find_label(app.detail_view, "刪除"))
+        # When: 復原，並等過原本的復原時間
+        click(app.btn_undo)
+        pump(app, daynote.UNDO_SECONDS + 0.3)
+        settle(app)
+        # Then: 還在
+        self.assertIn("寫週報", self.list_texts())
+        self.assertNotIn("delete_task", self.g.calls)
+        self.assertEqual(self.status(), "已復原「寫週報」")
+
+    def test_ctrl_z_undoes_delete(self):
+        """刪除後按 Ctrl+Z > 等同按「復原」"""
+        # Given: 剛刪除一筆
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        self.open("寫週報")
+        click(find_label(app.detail_view, "刪除"))
+        # When: Ctrl+Z
+        press_key(app, "<Control-z>")
+        app.update()
+        # Then: 回到清單
+        self.assertIn("寫週報", self.list_texts())
+
+    def test_delete_recurring_asks_and_can_cancel(self):
+        """刪除週期待辦 > 先詢問（刪了不會再有下一期）；按取消 > 不刪除，停在詳細頁"""
+        # Given: 每週一的週報
+        self.g.seed("交週報", self.today, notes="🔁 每週一")
         app = self.start()
         self.answer["askyesno"] = False
         # When: 刪除但取消
-        self.open("寫週報")
+        self.open("交週報")
         click(find_label(app.detail_view, "刪除"))
         pump(app, 0.2)
-        # Then: 沒刪
-        self.assertNotIn("delete_task", self.g.calls)
+        # Then: 有詢問、沒刪
+        self.assertIn("不會再產生下一期", self.dialogs[-1][2])
+        self.assertIsNone(app.pending_delete)
         self.assertTrue(app.detail_view.winfo_ismapped())
+
+    def test_pending_delete_not_revived_by_sync(self):
+        """刪除後、送出前剛好同步 > 那筆不會被同步帶回畫面"""
+        # Given: 剛刪除一筆（還在復原時間內）
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        self.open("寫週報")
+        click(find_label(app.detail_view, "刪除"))
+        # When: 同步
+        app.refresh()
+        settle(app)
+        # Then: 仍不在清單
+        self.assertNotIn("寫週報", self.list_texts())
+
+    def test_close_commits_pending_delete(self):
+        """刪除後馬上關閉 DayNote > 關閉前送出刪除，不會因為還在復原時間內就遺失"""
+        # Given: 剛刪除一筆
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        self.open("寫週報")
+        click(find_label(app.detail_view, "刪除"))
+        # When: 關閉
+        app.close(ask=False)
+        # Then: Google 上已刪除
+        self.assertTrue(self.g.tasks[task_id].get("deleted"))
+
+    def test_task_menu_pick_date(self):
+        """待辦按右鍵選「選日期…」 > 開日期選擇器，選了就改到那天"""
+        # Given: 今天的待辦
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        target = self.today + dt.timedelta(days=5)
+        # When: 右鍵「選日期…」並選 5 天後
+        app._build_task_menu(app.tasks[0]).invoke("選日期…")
+        app.update()
+        app.task_date_picker.pick(target)
+        settle(app)
+        # Then: Google 上改到那天
+        self.assertTrue(self.g.tasks[task_id]["due"].startswith(target.isoformat()))
+
+    def test_task_menu_delete(self):
+        """待辦按右鍵選「刪除」 > 從清單拿掉，可以復原"""
+        # Given: 今天的待辦
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        # When: 右鍵刪除
+        app._build_task_menu(app.tasks[0]).invoke("刪除")
+        app.update()
+        # Then: 拿掉、可復原
+        self.assertNotIn("寫週報", self.list_texts())
+        self.assertTrue(app.btn_undo.winfo_ismapped())
 
     def test_add_subtask(self):
         """詳細頁新增子工作 > 顯示在詳細頁與主畫面父工作下方"""
