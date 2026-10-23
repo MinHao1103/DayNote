@@ -93,6 +93,12 @@ class StoreGoogle:
         return [self._api(t) for t in self.tasks.values() if t["list_id"] == list_id
                 and t["status"] == "completed" and not t.get("deleted") and t.get("completed_at", since) > since]
 
+    def completed_between(self, list_id, start, end):
+        self._hit("completed_between")
+        return [self._api(t) for t in self.tasks.values() if t["list_id"] == list_id
+                and t["status"] == "completed" and not t.get("deleted")
+                and start <= t.get("completed_at", start) < end]
+
     def events(self, start, end, calendar_id="primary"):
         self._hit(f"events:{calendar_id}")
         return list(self.events_by_cal.get(calendar_id, []))
@@ -575,7 +581,7 @@ class StartupTest(AppTestCase):
         app.update()
         # Then: 項目都在
         labels = [item["label"] for item, _ in menu.rows]
-        self.assertEqual(labels, ["使用說明與快捷鍵（F1）", "風格", "會議提醒", "每日收尾", "立即同步（F5）", "登出 Google"])
+        self.assertEqual(labels, ["使用說明與快捷鍵（F1）", "風格", "會議提醒", "每日收尾", "產生週報", "立即同步（F5）", "登出 Google"])
         # When: 點使用說明
         menu._click(0)
         app.update()
@@ -783,6 +789,44 @@ class DoneSectionTest(AppTestCase):
         settle(app)
         # Then: 不在已完成
         self.assertEqual(app.done_today, [])
+
+
+class WeeklyReportTest(AppTestCase):
+    """「⋯」→「產生週報」：本週完成的待辦整理成文字，可修改後複製。"""
+
+    def test_report_lists_this_week_and_copies(self):
+        """本週完成兩筆 > 週報依清單列出；改一下內容按「複製」 > 剪貼簿是修改後的內容，視窗關閉"""
+        # Given: 本週（今天）完成的兩筆
+        for title, list_id in (("寫週報", "L1"), ("買牛奶", "L2")):
+            task_id = self.g.seed(title, self.today, list_id=list_id, status="completed")
+            self.g.tasks[task_id]["completed_at"] = dt.datetime.now()
+        app = self.start()
+        # When: 開週報並等讀取完成
+        app.menu_more.invoke("產生週報")
+        settle(app)
+        text = app.report_text.get("1.0", "end-1c")
+        # Then: 分組列出
+        self.assertIn("【工作】\n- 寫週報", text)
+        self.assertIn("【個人】\n- 買牛奶", text)
+        self.assertIn("共完成 2 件", text)
+        # When: 加一行再複製
+        app.report_text.insert("end", "\n下週：上線")
+        click(app.btn_report_copy)
+        # Then: 剪貼簿含修改，視窗關閉
+        self.assertTrue(self.clipboard.endswith("下週：上線"))
+        self.assertFalse(app.report_win.winfo_exists())
+
+    def test_last_week_excludes_this_week(self):
+        """切到「上週」 > 本週完成的不會出現"""
+        # Given: 今天完成一筆
+        task_id = self.g.seed("寫週報", self.today, status="completed")
+        self.g.tasks[task_id]["completed_at"] = dt.datetime.now()
+        app = self.start()
+        # When: 開上週的週報
+        app.open_weekly_report(weeks_ago=1)
+        settle(app)
+        # Then: 沒有資料
+        self.assertIn("這段期間沒有完成的待辦", app.report_text.get("1.0", "end-1c"))
 
 
 class WrapUpTest(AppTestCase):

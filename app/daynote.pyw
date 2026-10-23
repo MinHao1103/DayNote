@@ -920,6 +920,12 @@ class Google:
             "showCompleted": "true", "showHidden": "true", "maxResults": 100,
             "completedMin": since.astimezone().isoformat()})
 
+    def completed_between(self, list_id, start, end):
+        """[start, end)（本機時間）之間完成的任務，含隱藏（手機上清除的已完成任務）；供週報使用。"""
+        return self._paged(f"{TASKS_API}/lists/{_q(list_id)}/tasks", {
+            "showCompleted": "true", "showHidden": "true", "maxResults": 100,
+            "completedMin": start.astimezone().isoformat(), "completedMax": end.astimezone().isoformat()})
+
     def add_task(self, list_id, title, due, parent=None, notes=None):
         """新增工作；parent 指定時建立為該工作的子工作；notes 用來帶入「⏰ 時間」行。"""
         body = {"title": title}
@@ -1140,6 +1146,61 @@ def spawn_next(google, task, plan, include_deleted=False):
             "list_id": task["list_id"], "list_title": task.get("list_title", ""),
             "due": task_due(created) or plan["due"], "parent": None, "time": task.get("time"),
             "recur": task["recur"], "notes": task.get("notes", ""), "position": created.get("position", "")}
+
+
+def week_range(today, weeks_ago=0):
+    """週報的區間：週一 00:00 到下週一 00:00（不含）。weeks_ago＝0 本週、1 上週。
+
+    @return (週一, 下週一) 兩個 date
+    """
+    monday = today - dt.timedelta(days=today.weekday(), weeks=weeks_ago)
+    return monday, monday + dt.timedelta(days=7)
+
+
+def _short_day(day):
+    return f"{day.month}/{day.day}（{WEEKDAY_NAME[day.weekday()]}）"
+
+
+def build_weekly_report(done, start, end, lists):
+    """把區間內完成的待辦整理成週報文字：依清單分組（照清單順序），組內依完成時間排序。
+
+    同一清單同標題的（例如每天的週期待辦）合併成一行並標次數；子工作縮排在父工作下方（父工作也在週報裡時）。
+    純文字＋「- 」項目符號，貼到 Markdown、Teams、Email 都能讀。
+
+    @param done completed_task 格式的已完成任務
+    @param start 週一；@param end 下週一（不含）
+    @param lists 清單（決定分組順序）
+    @return 週報全文
+    """
+    lines = [f"週報 {_short_day(start)}～{_short_day(end - dt.timedelta(days=1))}", ""]
+    if not done:
+        return "\n".join(lines + ["這段期間沒有完成的待辦"])
+    order = {lst["id"]: index for index, lst in enumerate(lists)}
+    ids = {t["id"] for t in done}
+    children = {}
+    for t in done:
+        if t.get("parent") in ids:
+            children.setdefault(t["parent"], []).append(t)
+    by_list = {}
+    for t in sorted(done, key=lambda t: t["completed"] or dt.datetime.min):
+        if t.get("parent") not in ids:
+            by_list.setdefault(t["list_id"], []).append(t)
+    for list_id in sorted(by_list, key=lambda i: order.get(i, len(order))):
+        items = by_list[list_id]
+        lines.append(f"【{items[0]['list_title'] or '未命名清單'}】")
+        counts, firsts = {}, []
+        for t in items:  # 同標題合併，保留第一次出現的順序
+            if t["title"] not in counts:
+                firsts.append(t)
+            counts[t["title"]] = counts.get(t["title"], 0) + 1
+        for t in firsts:
+            times = counts[t["title"]]
+            lines.append(f"- {t['title']}" + (f"（{times} 次）" if times > 1 else ""))
+            for child in children.get(t["id"], []):
+                lines.append(f"  - {child['title']}")
+        lines.append("")
+    lines.append(f"共完成 {len(done)} 件")
+    return "\n".join(lines)
 
 
 def wrapup_summary(done_count, remaining):
@@ -3304,6 +3365,7 @@ class App(tk.Tk):
             self.menu_wrapup.add_radiobutton(label=at or "不提醒", value=at, variable=self.wrapup_var,
                                              command=lambda a=at: self.set_wrapup_at(a))
         self.menu_more.add_cascade(label="每日收尾", menu=self.menu_wrapup)
+        self.menu_more.add_command(label="產生週報", command=self.open_weekly_report)
         self.menu_more.add_separator()
         self.menu_more.add_command(label="立即同步（F5）", command=self.refresh)
         self.menu_more.add_separator()
@@ -4756,6 +4818,77 @@ class App(tk.Tk):
         win.geometry(f"+{x}+{y}")
         win_style_popup(win)
         win.focus_force()
+
+    def open_weekly_report(self, weeks_ago=0):
+        """週報視窗：選本週或上週，讀取期間完成的待辦整理成文字，可以先修改再一鍵複製。已開著就換區間重讀。"""
+        if getattr(self, "report_win", None) and self.report_win.winfo_exists():
+            self.report_win.destroy()
+        win = self.report_win = tk.Toplevel(self)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        body = tk.Frame(win, bg=BG, padx=px(18), pady=px(14))
+        body.pack(fill="both", expand=True)
+
+        head = tk.Frame(body, bg=BG)
+        head.pack(fill="x")
+        tk.Label(head, text="週報", bg=BG, fg=TEXT, font=TITLE_FONT, anchor="w").pack(side="left")
+        self._icon_button(head, "✕", win.destroy, tip="關閉（Esc）").pack(side="right")
+
+        ranges = tk.Frame(body, bg=BG)
+        ranges.pack(fill="x", pady=(px(8), px(6)))
+        for offset, label in ((0, "本週"), (1, "上週")):
+            Pill(ranges, label, lambda o=offset: self.open_weekly_report(o),
+                 style="primary" if offset == weeks_ago else "soft", padx=12, pady=3).pack(side="left", padx=(0, px(6)))
+        tk.Label(ranges, text="內容可以先修改再複製", bg=BG, fg=GRAY, font=SMALL).pack(side="right")
+
+        self.report_text = self._rounded_field(
+            body, lambda parent: tk.Text(parent, width=40, height=16, wrap="word", font=FONT, relief="flat",
+                                         bg=CARD_BG, fg=TEXT, insertbackground=TEXT, highlightthickness=0),
+            pady=(0, px(10)))
+        self.report_text.insert("1.0", "讀取中…")
+
+        bottom = tk.Frame(body, bg=BG)
+        bottom.pack(fill="x")
+        self.btn_report_copy = Pill(bottom, "複製", self._copy_weekly_report, style="primary", padx=16, pady=3)
+        self.btn_report_copy.pack(side="right")
+        Pill(bottom, "關閉", win.destroy, style="outline", padx=14, pady=3).pack(side="right", padx=(0, px(6)))
+
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.update_idletasks()  # 置中在主視窗上；超出螢幕時往內收
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        y = self.winfo_rooty() + px(60)
+        screen = win_virtual_screen()
+        if screen:
+            x = min(max(x, screen[0]), screen[2] - w)
+            y = min(max(y, screen[1]), screen[3] - h)
+        win.geometry(f"+{x}+{y}")
+        win_style_popup(win)
+        win.focus_force()
+
+        start, end = week_range(dt.date.today(), weeks_ago)
+        lists = list(self.lists)
+
+        def work():
+            begin, finish = (dt.datetime.combine(d, dt.time()) for d in (start, end))
+            done = [completed_task(raw, lst) for lst in lists for raw in self.g.completed_between(lst["id"], begin, finish)
+                    if raw.get("status") == "completed" and not raw.get("deleted")]
+            return build_weekly_report(done, start, end, lists)
+
+        def done(text, err):
+            if not win.winfo_exists():
+                return  # 讀取期間關掉或換了區間
+            self.report_text.delete("1.0", "end")
+            self.report_text.insert("1.0", f"讀取失敗：{err}" if err else text)
+        self.run_bg(work, done)
+
+    def _copy_weekly_report(self):
+        """複製週報視窗的內容（含使用者的修改）到剪貼簿。"""
+        self.clipboard_clear()
+        self.clipboard_append(self.report_text.get("1.0", "end-1c"))
+        self._set_status("已複製週報，可以直接貼上")
+        self.report_win.destroy()
 
     def _shift_day(self, days):
         if self.detail or self.draft or isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)):

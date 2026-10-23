@@ -15,7 +15,7 @@
     loggedout  尚未登入                      quick      快速列（Ctrl + Alt + D）
     quicktype  快速列輸入中（顯示辨識結果）  toast      右下角提醒
     meeting    會議前提醒（含「加入會議」）  done       今天的「已完成」區塊（展開）
-    wrapup     每日收尾摘要
+    wrapup     每日收尾摘要                  report     週報（「⋯」→「產生週報」）
 
 - 不會讀寫 data 資料夾、不連網路：資料全部來自 tests/test_app_gui.py 的 StoreGoogle 替身
 - 只使用 Python 標準函式庫（Win32 GDI 擷取畫面、zlib 編碼 PNG）
@@ -45,7 +45,7 @@ if "--theme" in sys.argv[:-1]:
 from tests.test_app_gui import HOLIDAY_CAL, StoreGoogle, daynote, pump, settle  # noqa: E402
 
 PAGES = ("main", "month", "daytip", "help", "datepicker", "timepicker", "recurpicker", "moremenu", "taskmenu",
-         "snoozemenu", "confirm", "asktext", "detail", "new", "loggedout", "quick", "quicktype", "toast", "meeting", "done", "wrapup")
+         "snoozemenu", "confirm", "asktext", "detail", "new", "loggedout", "quick", "quicktype", "toast", "meeting", "done", "wrapup", "report")
 DEFAULT_OUT = os.path.join(ROOT, "docs", "images", "00-app.png")
 
 
@@ -226,6 +226,15 @@ def open_page(app, g, page, today):
         toast = daynote.ReminderToast(app, task, dt.datetime.combine(today, task["time"]),
                                       lambda: None, lambda: None)
         return toast.win
+    elif page == "report":
+        for title in ("回信給客戶", "買牛奶", "準備週會簡報"):
+            app.complete(next(t for t in app.tasks if t["title"] == title))
+        pump(app, 0.5)
+        for raw in g.tasks.values():  # 替身沒有完成時間欄位，補上才會落在本週區間
+            raw.setdefault("completed_at", dt.datetime.now())
+        app.open_weekly_report()
+        settle(app)
+        return app.report_win
     elif page == "wrapup":
         app.complete(next(t for t in app.tasks if t["title"] == "買牛奶"))
         pump(app, 0.5)
