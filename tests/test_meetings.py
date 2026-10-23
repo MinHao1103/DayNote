@@ -1,4 +1,4 @@
-"""會議前提醒：從日曆行程挑出要提醒的會議、找出「加入會議」連結（meeting_link、upcoming_meetings）。
+"""會議前提醒與每日收尾：挑出要提醒的會議、找出「加入會議」連結（meeting_link、upcoming_meetings）、收尾摘要文字（wrapup_summary）。
 
 執行方式（在 DayNote 根目錄）：python -m unittest discover -s tests -t . -v
 """
@@ -85,6 +85,26 @@ class UpcomingMeetingsTest(unittest.TestCase):
                 text = daynote.meeting_start_text(start, now)
                 # Then: 正確
                 self.assertEqual(text, expected)
+
+
+class WrapUpSummaryTest(unittest.TestCase):
+
+    def test_summary_text(self):
+        """完成數與剩下的待辦 > 標題寫完成幾件，說明列出最多三件，超過加「…」"""
+        def tasks(*titles):
+            return [{"title": t} for t in titles]
+        cases = {
+            (6, ("寫週報", "回信")): ("今天完成 6 件", "還剩 2 件：\n寫週報、回信"),
+            (2, ("甲", "乙", "丙", "丁")): ("今天完成 2 件", "還剩 4 件：\n甲、乙、丙…"),
+            (3, ()): ("今天完成 3 件", "今天的待辦都完成了"),
+            (0, ("回信",)): ("今天還沒有完成的待辦", "還剩 1 件：\n回信"),
+        }
+        for (done, titles), expected in cases.items():
+            with self.subTest(done=done, titles=titles):
+                # Given / When: 組摘要
+                summary = daynote.wrapup_summary(done, tasks(*titles))
+                # Then: 文字正確
+                self.assertEqual(summary, expected)
 
 
 if __name__ == "__main__":

@@ -105,6 +105,9 @@ REMINDER_TOMORROW_AT = dt.time(9, 0)   # 延後下拉選單「明天早上」的
 REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
 MEETING_REMIND_DEFAULT_MIN = 5   # 日曆行程預設在開始前幾分鐘提醒（0＝不提醒）；「⋯」→「會議提醒」可改
 MEETING_REMIND_OPTIONS = (0, 1, 5, 10, 15)
+WRAPUP_DEFAULT = "18:00"         # 每日收尾提醒的預設時間；「⋯」→「每日收尾」可改或關閉（空字串＝不提醒）
+WRAPUP_OPTIONS = ("", "17:00", "17:30", "18:00", "18:30", "19:00")
+WRAPUP_WINDOW_H = 3              # 收尾時間過後 3 小時內打開 DayNote 仍會補跳；更晚就不跳（已經下班了）
 MEETING_LATE_MIN = 10            # 行程開始超過 10 分鐘（例如剛開機）就不補跳，免得會都開完了才提醒
 # 只認這些視訊會議網址（https），從行程的地點、說明裡找「加入會議」連結
 MEETING_URL_RE = re.compile(r"https://(?:[\w-]+\.)*(?:teams\.microsoft\.com|teams\.live\.com|meet\.google\.com"
@@ -1137,6 +1140,18 @@ def spawn_next(google, task, plan, include_deleted=False):
             "list_id": task["list_id"], "list_title": task.get("list_title", ""),
             "due": task_due(created) or plan["due"], "parent": None, "time": task.get("time"),
             "recur": task["recur"], "notes": task.get("notes", ""), "position": created.get("position", "")}
+
+
+def wrapup_summary(done_count, remaining):
+    """每日收尾的摘要：(標題, 說明)。remaining 為今天與逾期還沒完成的待辦。
+
+    @return 例如 ("今天完成 6 件", "還剩 2 件：\\n寫週報、回信")；都完成時說明為「今天的待辦都完成了」
+    """
+    title = f"今天完成 {done_count} 件" if done_count else "今天還沒有完成的待辦"
+    if not remaining:
+        return title, "今天的待辦都完成了"
+    names = "、".join(t["title"] for t in remaining[:3]) + ("…" if len(remaining) > 3 else "")
+    return title, f"還剩 {len(remaining)} 件：\n{names}"  # 換行：不讓「還剩 3 件」在空格處被折斷
 
 
 def meeting_start_text(start, now):
@@ -2425,6 +2440,42 @@ class ReminderToast:
         ReminderToast.relayout()
 
 
+class WrapUpToast(ReminderToast):
+    """每日收尾（下班時間）：右下角摘要今天完成幾件、還剩哪些，可一鍵把剩下的移到明天。"""
+
+    def __init__(self, app, title, detail, remaining):
+        self.app = app
+        win = self.win = tk.Toplevel(app)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        body = tk.Frame(win, bg=BG, padx=px(14), pady=px(10))
+        body.pack(fill="both")
+        head = tk.Frame(body, bg=BG)
+        head.pack(fill="x")
+        tk.Label(head, text="DayNote 每日收尾", bg=BG, fg=GRAY, font=SMALL).pack(side="left")
+        close = tk.Label(head, text="✕", bg=BG, fg=GRAY, font=ICON_FONT, cursor="hand2")
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda e: self.close())
+        tk.Label(body, text=title, bg=BG, fg=TEXT, font=(UI_FONT, 12, "bold"), anchor="w").pack(
+            fill="x", pady=(px(6), 0))
+        tk.Label(body, text=detail, bg=BG, fg=GRAY, font=FONT, anchor="w", justify="left",
+                 wraplength=px(self.WIDTH - 40)).pack(fill="x", pady=(px(2), px(10)))
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill="x")
+        if remaining:
+            self.btn_move = Pill(buttons, "全部移到明天", lambda: (self.close(), app.move_to_tomorrow(remaining)),
+                                 style="primary", padx=12, pady=3)
+            self.btn_move.pack(side="right")
+            Pill(buttons, "開啟清單", lambda: (self.close(), app.show_main()), style="outline", padx=12, pady=3).pack(
+                side="right", padx=(0, px(8)))
+        else:
+            Pill(buttons, "知道了", self.close, style="primary", padx=12, pady=3).pack(side="right")
+        ReminderToast.active.append(self)
+        ReminderToast.relayout()
+        win_style_popup(win)
+
+
 class QuickBar:
     """快速列（Ctrl + Alt + D）：螢幕中央的一條輸入列，不用打開主視窗就能新增、完成、搜尋待辦。
 
@@ -3246,6 +3297,13 @@ class App(tk.Tk):
                                               variable=self.meeting_var,
                                               command=lambda m=minutes: self.set_meeting_remind(m))
         self.menu_more.add_cascade(label="會議提醒", menu=self.menu_meeting)
+        # 每日收尾：下班時間摘要今天完成幾件、還剩哪些
+        self.menu_wrapup = PopupMenu(self)
+        self.wrapup_var = tk.StringVar(self, value=self._wrapup_at_text())
+        for at in WRAPUP_OPTIONS:
+            self.menu_wrapup.add_radiobutton(label=at or "不提醒", value=at, variable=self.wrapup_var,
+                                             command=lambda a=at: self.set_wrapup_at(a))
+        self.menu_more.add_cascade(label="每日收尾", menu=self.menu_wrapup)
         self.menu_more.add_separator()
         self.menu_more.add_command(label="立即同步（F5）", command=self.refresh)
         self.menu_more.add_separator()
@@ -4520,6 +4578,41 @@ class App(tk.Tk):
         changed = self._fire_meeting_reminders(now) or changed
         if changed:
             self._save_reminder_state()
+        self._maybe_wrap_up(now)
+
+    def _wrapup_at_text(self):
+        """每日收尾時間文字（「18:00」，空字串＝不提醒）；state.json 沒有或值不合法時用預設。"""
+        value = self.state_data.get("wrapup_at", WRAPUP_DEFAULT)
+        return value if value in WRAPUP_OPTIONS else WRAPUP_DEFAULT
+
+    def set_wrapup_at(self, at):
+        """「⋯」→「每日收尾」：記住時間，下一次檢查就生效。"""
+        self.state_data["wrapup_at"] = at
+        save_state(self.state_data)
+        self._set_status(f"每日收尾：{at} 提醒" if at else "已關閉每日收尾")
+
+    def _maybe_wrap_up(self, now):
+        """到了收尾時間（一天一次）就跳出摘要；沒登入、沒有任何待辦或已經太晚時不跳。"""
+        at = self._wrapup_at_text()
+        if not at or not self.g.refresh_token or self.state_data.get("wrapup_last") == now.date().isoformat():
+            return
+        start = dt.datetime.combine(now.date(), dt.time.fromisoformat(at))
+        if not start <= now < start + dt.timedelta(hours=WRAPUP_WINDOW_H):
+            return
+        remaining = sorted((t for t in self._top_level() if t["due"] and t["due"] <= now.date()),
+                           key=lambda t: (t["due"], self._order_key(t)))
+        done_count = len(self.done_today)
+        self.state_data["wrapup_last"] = now.date().isoformat()
+        save_state(self.state_data)
+        if not remaining and not done_count:
+            return  # 今天什麼都沒有，不打擾
+        title, detail = wrapup_summary(done_count, remaining)
+        log.info("Wrap-up shown: done=%d remaining=%d", done_count, len(remaining))
+        WrapUpToast(self, title, detail, remaining)
+
+    def move_to_tomorrow(self, tasks):
+        """每日收尾的「全部移到明天」：沿用右鍵改日期（可復原）。"""
+        self.reschedule([t for t in tasks if t in self.tasks], dt.date.today() + dt.timedelta(days=1))
 
     def _meeting_remind_min(self):
         """會議提醒提前幾分鐘（0＝不提醒）；state.json 沒有或值不合法時用預設。"""
