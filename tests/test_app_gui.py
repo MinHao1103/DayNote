@@ -646,6 +646,47 @@ class StartupTest(AppTestCase):
         self.assertTrue(menu.is_open())
         menu.close()
 
+    def test_menu_returns_focus_to_main_window(self):
+        """「⋯」→「風格」選墨夜 > 選單收起後焦點回到主視窗（否則 Windows 會把別的程式拉到前面，DayNote 被蓋住）"""
+        # Given: 打開「⋯」選單並展開「風格」子選單（焦點在選單上）
+        self.use_theme_cleanup()
+        app = self.start()
+        menu = app.menu_more
+        menu.tk_popup(app.winfo_rootx() + 20, app.winfo_rooty() + 20)
+        app.update()
+        menu._step(1)
+        menu._step(1)
+        menu._open_child_keyboard()
+        app.update()
+        child = app.menu_theme
+        self.assertTrue(str(app.focus_get()).startswith(str(child.win)))
+        # When: 點「墨夜（深色）」
+        row = next(canvas for item, canvas in child.rows if item.get("label") == "墨夜（深色）")
+        click(row)
+        pump(app, 0.3)
+        # Then: 已換色，焦點在主視窗
+        self.assertEqual(app.cget("bg"), daynote.THEMES["night"]["colors"]["BG"])
+        focus = app.focus_get()
+        self.assertIsNotNone(focus)
+        self.assertEqual(focus.winfo_toplevel(), app)
+
+    def test_picker_returns_focus_to_main_window(self):
+        """詳細頁選日期 > 選擇器收起後焦點回到主視窗"""
+        # Given: 詳細頁打開日期選擇器
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        app.open_detail(app.tasks[0])
+        app.update()
+        picker = daynote.DatePicker(app, app.detail_title, self.today, app._set_detail_due)
+        app.update()
+        # When: 選明天
+        picker.pick(self.today + dt.timedelta(days=1))
+        app.update()
+        # Then: 焦點在主視窗
+        focus = app.focus_get()
+        self.assertIsNotNone(focus)
+        self.assertEqual(focus.winfo_toplevel(), app)
+
     def test_themed_dialog_buttons(self):
         """圓角對話框 > 按「刪除」回傳 True；按 Esc 回傳取消的值；按鈕文字依情境"""
         # Given: 已啟動

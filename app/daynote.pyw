@@ -1417,6 +1417,23 @@ def _notes_preview(notes, limit=24):
     return line if len(line) <= limit else line[:limit] + "…"
 
 
+def destroy_returning_focus(win, owner):
+    """關閉選單、選擇器這類會搶焦點的小視窗：焦點還在它身上時，先把焦點交回主視窗再刪除。
+
+    直接刪掉作用中的視窗，Windows 會自己挑下一個視窗啟用，常常挑到別的程式，
+    DayNote（掛在桌面上）就被蓋到最後面。因為點到外面而關閉時焦點已在別處，不搶回來。
+    """
+    if not win.winfo_exists():
+        return
+    try:
+        focus = win.focus_get()
+    except (KeyError, tk.TclError):
+        focus = None
+    if focus is not None and str(focus).startswith(str(win)):
+        owner.winfo_toplevel().focus_force()
+    win.destroy()
+
+
 def _descendants(widget):
     for child in widget.winfo_children():
         yield child
@@ -1813,6 +1830,19 @@ class PopupMenu:
             parent.child = None
             parent.win.focus_force()
 
+    def _focus_inside(self):
+        """焦點是否在這一層或它打開的子選單裡。"""
+        menu, wins = self, []
+        while menu:
+            if menu.win is not None and menu.win.winfo_exists():
+                wins.append(str(menu.win))
+            menu = menu.child
+        try:
+            focus = self.master.focus_get()
+        except (KeyError, tk.TclError):
+            return False
+        return focus is not None and any(str(focus).startswith(w) for w in wins)
+
     def root_menu(self):
         menu = self
         while menu.parent and menu.parent.win:
@@ -1838,7 +1868,13 @@ class PopupMenu:
         return bool(self.win) and self.win.winfo_exists()
 
     def close(self):
-        """收起這一層與它打開的子選單。"""
+        """收起這一層與它打開的子選單。
+
+        最上層選單收起時，焦點若還在這組選單（含子選單）裡，先交回主視窗：
+        直接刪掉作用中的選單視窗，Windows 會把別的程式拉到前面，DayNote（掛在桌面上）就被蓋到最後面。
+        """
+        if self.parent is None and self._focus_inside():
+            self.master.winfo_toplevel().focus_force()
         if self.child:
             self.child.close()
             self.child = None
@@ -2105,7 +2141,7 @@ class _Popup:
     def close(self):
         if self.win.winfo_exists():
             self.win.grab_release()
-            self.win.destroy()
+            destroy_returning_focus(self.win, self.app)
 
 
 class DatePicker(_Popup):
