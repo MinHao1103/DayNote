@@ -15,6 +15,7 @@
     loggedout  尚未登入                      quick      快速列（Ctrl + Alt + D）
     quicktype  快速列輸入中（顯示辨識結果）  toast      右下角提醒
     done       今天的「已完成」區塊（展開）    search     主視窗搜尋（Ctrl+F）
+    event      點日曆行程的細節卡片          links      詳細頁的網址連結
 
 - 不會讀寫 data 資料夾、不連網路：資料全部來自 tests/test_app_gui.py 的 StoreGoogle 替身
 - 只使用 Python 標準函式庫（Win32 GDI 擷取畫面、zlib 編碼 PNG）
@@ -44,7 +45,7 @@ if "--theme" in sys.argv[:-1]:
 from tests.test_app_gui import HOLIDAY_CAL, StoreGoogle, daynote, pump, settle  # noqa: E402
 
 PAGES = ("main", "month", "daytip", "help", "datepicker", "timepicker", "recurpicker", "moremenu", "taskmenu",
-         "snoozemenu", "confirm", "asktext", "detail", "new", "loggedout", "quick", "quicktype", "toast", "done", "search")
+         "snoozemenu", "confirm", "asktext", "detail", "new", "loggedout", "quick", "quicktype", "toast", "done", "search", "event", "links")
 DEFAULT_OUT = os.path.join(ROOT, "docs", "images", "00-app.png")
 
 
@@ -120,11 +121,13 @@ def seed_sample(g, today):
     """README 截圖用的範例資料：逾期、有時間的待辦、子工作、日曆行程、其他清單。"""
     day = today.isoformat()
     g.events_by_cal["primary"].append(
-        {"summary": "週會", "start": {"dateTime": f"{day}T15:00:00"}, "end": {"dateTime": f"{day}T16:00:00"}})
+        {"summary": "週會", "start": {"dateTime": f"{day}T15:00:00"}, "end": {"dateTime": f"{day}T16:00:00"},
+         "location": "3F 會議室 A", "description": "議程：上週進度、下週上線檢核 https://teams.microsoft.com/l/meetup-join/<MEETING_ID>",
+         "htmlLink": "https://www.google.com/calendar/event?eid=<EVENT_ID>"})
     g.seed("繳電話費", today - dt.timedelta(days=3))
     parent = g.seed("準備週會簡報", today, notes="⏰ 14:00")
     g.seed("整理上週數據", today, parent=parent)
-    g.seed("回信給客戶", today, notes="⏰ 16:30")
+    g.seed("回信給客戶", today, notes="⏰ 16:30\n報價單：https://docs.example.com/quote/2026-10")
     g.seed("買牛奶", today, list_id="L2")
 
 
@@ -138,6 +141,14 @@ def open_page(app, g, page, today):
     """切換到要截圖的畫面，回傳要截的視窗。"""
     if page == "month":
         app.toggle_compact()
+    elif page == "event":
+        label = next(w for w in _descendants(app.list_frame) if isinstance(w, daynote.tk.Label) and w.cget("text") == "週會")
+        label.event_generate("<Button-1>")
+        pump(app, 0.3)
+        return [app, app.event_popup.win]
+    elif page == "links":
+        app.open_detail(next(t for t in app.tasks if t["title"] == "回信給客戶"))
+        app.update()
     elif page == "search":
         app.open_search("報")
         app.update()

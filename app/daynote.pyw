@@ -15,6 +15,7 @@ import ctypes
 import dataclasses
 import datetime as dt
 import hashlib
+import html
 import http.server
 import json
 import logging
@@ -245,7 +246,7 @@ ICON_FAMILIES = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
 ICON_GLYPH_FONT = None   # 由 apply_fonts() 決定；None 表示沒有圖示字型，維持原本的符號
 GLYPHS = {"📅": "\ue787", "⏰": "\ue823", "🔁": "\ue8ee", "📁": "\ue8b7", "＋": "\ue710", "✓": "\ue73e",
           "←": "\ue72b", "▾": "\ue70d", "▼": "\ue70d", "▶": "\ue76c", "◀": "\ue76b", "⟳": "\ue72c",
-          "📌": "\ue718", "—": "\ue921", "✕": "\ue8bb", "⋯": "\ue712", "☀": "\ue706", "🌙": "\ue708"}
+          "📌": "\ue718", "—": "\ue921", "✕": "\ue8bb", "⋯": "\ue712", "🔗": "\ue71b", "☀": "\ue706", "🌙": "\ue708"}
 
 
 def icon_parts(text):
@@ -2014,6 +2015,92 @@ def task_due(task):
     return dt.date.fromisoformat(due[:10]) if due else None
 
 
+URL_RE = re.compile(r"https?://[^\s<>\"'）」】、，。]+")
+# 視訊會議網址（https）：Teams、Google Meet、Zoom、Webex
+MEETING_URL_RE = re.compile(r"https://(?:[\w-]+\.)*(?:teams\.microsoft\.com|teams\.live\.com|meet\.google\.com"
+                            r"|zoom\.us|webex\.com)/[^\s<>\"')]+")
+
+
+def find_urls(text):
+    """文字裡的 http／https 網址（去掉結尾的標點），依出現順序。"""
+    return [match.group(0).rstrip(".,;:!?") for match in URL_RE.finditer(text or "")]
+
+
+def meeting_link(event):
+    """行程的視訊會議連結：Google Meet 欄位優先，其次是地點與說明裡的 Teams／Meet／Zoom／Webex 網址；沒有回傳 None。"""
+    if str(event.get("hangoutLink", "")).startswith("https://"):
+        return event["hangoutLink"]
+    for entry in event.get("conferenceData", {}).get("entryPoints", []):
+        uri = str(entry.get("uri", ""))
+        if entry.get("entryPointType") == "video" and uri.startswith("https://"):
+            return uri
+    for field in ("location", "description"):
+        match = MEETING_URL_RE.search(str(event.get(field, "")))
+        if match:
+            return match.group(0).rstrip(".,;")
+    return None
+
+
+def link_urls(text_widget):
+    """多行輸入框裡的網址畫成連結（強調色＋底線），點了用瀏覽器開；打字時重新標示。
+
+    點網址只開連結、不移動游標；要改網址旁的文字，點網址以外的地方。
+    """
+    text_widget.tag_configure("url", foreground=ACCENT, underline=True)
+
+    def mark(_=None):
+        text_widget.tag_remove("url", "1.0", "end")
+        content = text_widget.get("1.0", "end-1c")
+        for match in URL_RE.finditer(content):
+            url = match.group(0).rstrip(".,;:!?")
+            text_widget.tag_add("url", f"1.0+{match.start()}c", f"1.0+{match.start() + len(url)}c")
+
+    def open_url(event):
+        index = text_widget.index(f"@{event.x},{event.y}")
+        span = text_widget.tag_prevrange("url", f"{index}+1c")
+        if span and text_widget.compare(span[0], "<=", index) and text_widget.compare(index, "<", span[1]):
+            webbrowser.open(text_widget.get(*span))
+            return "break"
+        return None
+    text_widget.tag_bind("url", "<Enter>", lambda e: text_widget.config(cursor="hand2"))
+    text_widget.tag_bind("url", "<Leave>", lambda e: text_widget.config(cursor="xterm"))
+    text_widget.tag_bind("url", "<Button-1>", open_url)
+    text_widget.bind("<KeyRelease>", mark, add="+")
+    mark()
+    text_widget.mark_url = mark  # 測試與重畫時可直接重新標示
+
+
+def _plain_text(value, limit=300):
+    """行程說明可能是 HTML（Outlook、Google 日曆編輯器）：拿掉標籤、還原字元、合併空白，太長截斷。"""
+    text = html.unescape(re.sub(r"<br\s*/?>|</p>|</div>", "\n", value or "", flags=re.I))
+    text = re.sub(r"<[^>]+>", "", text)
+    text = "\n".join(" ".join(line.split()) for line in text.splitlines())
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def event_info(event):
+    """點行程時顯示的細節：標題、時間範圍、地點、說明、會議連結、Google 日曆網址（只接受 https）。"""
+    start, end = event.get("start", {}), event.get("end", {})
+    if "date" in start:
+        first = dt.date.fromisoformat(start["date"])
+        last = dt.date.fromisoformat(end.get("date", start["date"])) - dt.timedelta(days=1)
+        when = "全天" if last <= first else f"{date_text(first)}～{date_text(last)}（全天）"
+    else:
+        begin = dt.datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00")).astimezone()
+        finish = dt.datetime.fromisoformat(end.get("dateTime", start["dateTime"]).replace("Z", "+00:00")).astimezone()
+        when = f"{date_text(begin.date())} {begin:%H:%M} – {finish:%H:%M}"
+    calendar_url = str(event.get("htmlLink", ""))
+    link = meeting_link(event)
+    location, description = _plain_text(event.get("location", ""), 120), _plain_text(event.get("description", ""))
+    if link:  # 會議網址已經做成「加入會議」按鈕，說明與地點裡就不再顯示整串網址
+        location, description = (re.sub(r"[ \t]{2,}", " ", text.replace(link, "")).strip()
+                                 for text in (location, description))
+    return {"title": event.get("summary") or "（無標題）", "when": when, "location": location,
+            "description": description, "link": link,
+            "calendar_url": calendar_url if calendar_url.startswith("https://") else None}
+
+
 def event_days(event):
     """回傳事件要顯示的 [(日期, 時間文字)]。
 
@@ -2225,6 +2312,42 @@ class _Popup:
         if self.win.winfo_exists():
             self.win.grab_release()
             destroy_returning_focus(self.win, self.app)
+
+
+class EventPopup(_Popup):
+    """點日曆行程跳出的細節卡片：時間、地點、說明；有視訊連結時「加入會議」，可以到 Google 日曆開啟。"""
+
+    WIDTH = 320
+
+    def __init__(self, app, anchor, info):
+        self.info = info
+        super().__init__(app, anchor)
+
+    def _render(self):
+        info, wrap = self.info, px(self.WIDTH - 40)
+        tk.Label(self.body, text=info["title"], bg=CARD_BG, fg=TEXT, font=(UI_FONT, 12, "bold"), anchor="w",
+                 justify="left", wraplength=wrap).pack(fill="x", pady=(px(4), px(6)))
+        for label, value in (("時間", info["when"]), ("地點", info["location"]), ("說明", info["description"])):
+            if not value:
+                continue
+            row = tk.Frame(self.body, bg=CARD_BG)
+            row.pack(fill="x", pady=px(2))
+            tk.Label(row, text=label, bg=CARD_BG, fg=GRAY, font=SMALL, width=4, anchor="nw").pack(side="left", anchor="n")
+            tk.Label(row, text=value, bg=CARD_BG, fg=TEXT, font=SMALL if label == "說明" else FONT, anchor="w",
+                     justify="left", wraplength=wrap - px(40)).pack(side="left", fill="x")
+        buttons = tk.Frame(self.body, bg=CARD_BG)
+        buttons.pack(fill="x", pady=(px(10), px(2)))
+        if info["link"]:
+            self.btn_join = Pill(buttons, "加入會議", lambda: self._open(info["link"]), style="primary",
+                                 padx=12, pady=3, bg=CARD_BG)
+            self.btn_join.pack(side="right")
+        if info["calendar_url"]:
+            Pill(buttons, "在 Google 日曆開啟", lambda: self._open(info["calendar_url"]), style="outline",
+                 padx=12, pady=3, bg=CARD_BG).pack(side="right", padx=(0, px(6)) if info["link"] else 0)
+
+    def _open(self, url):
+        self.close()
+        webbrowser.open(url)
 
 
 class DatePicker(_Popup):
@@ -3545,7 +3668,7 @@ class App(tk.Tk):
         """更新「下一件」：只在選中今天時顯示，其他日子留空（摘要是給「現在」用的）。"""
         text = ""
         if self.g.refresh_token and self.selected == self.today:
-            items = [(parse_time_text(when), title) for when, title in self.events.get(self.today, [])]
+            items = [(parse_time_text(when), title) for when, title, _ in self.events.get(self.today, [])]
             items += [(t["time"], t["title"]) for t in self.tasks if t["due"] == self.today and t.get("time")]
             text = next_up_text([(at, title) for at, title in items if at], self._now())
         self.lbl_next.config(text=text)
@@ -3667,14 +3790,14 @@ class App(tk.Tk):
             tk.Label(self.list_frame, text=f"◆ {name}" + ("（放假）" if day_off else ""),
                      bg=BG, fg=HOLIDAY_RED if day_off else GRAY, font=FONT, anchor="w").pack(fill="x", pady=(0, 2))
         # 行程與待辦合成一條時間軸：全天行程 → 有時間的依時間 → 沒時間的待辦（維持 Google Tasks 順序）
-        timeline = [((0, dt.time.min) if when == "全天" else (1, parse_time_text(when) or dt.time.min), (when, title), None)
-                    for when, title in events]
+        timeline = [((0, dt.time.min) if event[0] == "全天" else (1, parse_time_text(event[0]) or dt.time.min), event, None)
+                    for event in events]
         timeline += [((1, t["time"]) if t.get("time") else (2, dt.time.min), None, t) for t in tasks]
         for _, event, task in sorted(timeline, key=lambda item: item[0]):  # sorted 穩定：同時間時行程在前
             if task:
                 self._task_with_children(task)
             else:
-                self._card(event[1], "Google 日曆", None, at=event[0])
+                self._card(event[1], "Google 日曆", None, at=event[0], event=event[2])
         for task in previews:
             self._preview_card(task)
         done = sorted(self.done_today, key=lambda t: t["completed"] or dt.datetime.min) if day == self.today else []
@@ -3701,6 +3824,10 @@ class App(tk.Tk):
                 for task in undated:
                     self._task_with_children(task)
         self.list_canvas.yview_moveto(0)
+
+    def show_event(self, info, anchor):
+        """點日曆行程：在卡片下方跳出細節卡片。"""
+        self.event_popup = EventPopup(self, anchor, info)
 
     def search_tasks(self, query):
         """未完成待辦裡標題或詳細資訊含 query 的（不分大小寫），依日期排序（沒日期的在最後）；空字串回傳空清單。
@@ -3895,13 +4022,15 @@ class App(tk.Tk):
                        at_fg=RED if is_late(child, now) else GRAY,
                        gap=tight if index < len(children) - 1 else None)
 
-    def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None, gap=None, done=False):
+    def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None, gap=None, done=False,
+              event=None):
         """清單中的一筆：圓角卡片浮在底色上，卡片之間留空隙（取代分隔線）；滑過時卡片變色。
 
         task 為 None 時是日曆行程：卡片左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
         at＝右側時間欄文字（14:00、全天）；行程與待辦的時間都靠右對齊，掃一眼就能讀出順序。
         gap＝和下一張卡片的空隙；父工作與子工作之間縮小空隙，看起來是同一組。
         done＝已完成區塊的卡片：實心打勾圓圈（點了改回未完成）、灰色標題、不開詳細頁。
+        event＝行程細節（event_info）：點了跳出小卡片顯示時間、地點、說明與加入會議。
         """
         subtitle_fg, at_fg = subtitle_fg or GRAY, at_fg or GRAY
         row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(50))
@@ -3920,16 +4049,26 @@ class App(tk.Tk):
             # 行程沒有完成圓圈；留同寬的空位，標題才會和待辦對齊
             spacer = tk.Frame(inner, bg=CARD, width=px(22), height=px(22))
             spacer.pack(side="left", padx=(0, px(10)))
-            Tooltip(row, "Google 日曆行程（唯讀，請到日曆 App 修改）")
+            Tooltip(row, "點一下看行程細節（唯讀，請到日曆 App 修改）")
         lbl_at = None
         if at:  # 時間欄先 pack，標題太長時被壓縮的是標題而不是時間
             lbl_at = tk.Label(inner, text=at, bg=CARD, fg=at_fg, font=EVENT_TIME_FONT, anchor="e")
             lbl_at.pack(side="right", anchor="n", padx=(px(8), px(4)), pady=(px(2), 0))
         text = tk.Frame(inner, bg=CARD)
         text.pack(side="left", fill="x", expand=True)
-        lbl_title = tk.Label(text, text=title, bg=CARD, fg=GRAY if done else TEXT, font=FONT, anchor="w",
+        title_row = tk.Frame(text, bg=CARD)
+        title_row.pack(fill="x")
+        lbl_title = tk.Label(title_row, text=title, bg=CARD, fg=GRAY if done else TEXT, font=FONT, anchor="w",
                              justify="left")
-        lbl_title.pack(fill="x")
+        lbl_title.pack(side="left")
+        urls = find_urls(task.get("notes", "")) if task and not done else []
+        lbl_link = None
+        if urls:  # 詳細資訊裡有網址：標題旁的連結圖示，點了直接開第一個網址
+            lbl_link = tk.Label(title_row, text=GLYPHS["🔗"] if ICON_GLYPH_FONT else "🔗", bg=CARD, fg=ACCENT,
+                                font=(ICON_GLYPH_FONT, 9) if ICON_GLYPH_FONT else SMALL, cursor="hand2")
+            lbl_link.pack(side="left", padx=(px(6), 0))
+            lbl_link.bind("<Button-1>", lambda e: (webbrowser.open(urls[0]), "break")[1])
+            Tooltip(lbl_link, f"開啟連結：{urls[0]}")
         preview = _notes_preview(task.get("notes", "")) if task and not done else ""
         if preview:  # 比照 Google Tasks：標題下方顯示詳細資訊第一行
             tk.Label(text, text=preview, bg=CARD, fg=GRAY, font=SMALL, anchor="w").pack(fill="x")
@@ -3938,8 +4077,13 @@ class App(tk.Tk):
         pad_x, pad_y = px(12), px(6)  # 卡片內距
         gap = px(5) if gap is None else gap  # 卡片之間的空隙（不畫卡片）
         window = row.create_window(pad_x, pad_y, window=inner, anchor="nw")
+        if event is not None:  # 行程：點整列看細節
+            for widget in (row, inner, text, title_row, *text.winfo_children(), *title_row.winfo_children(),
+                           *([lbl_at] if lbl_at else [])):
+                widget.bind("<Button-1>", lambda e: self.show_event(event, row))
+                widget.config(cursor="hand2")
         if task and not done:  # 點整列（圓圈以外）開啟詳細頁；按右鍵開快速選單（改日期、完成）
-            for widget in (row, inner, text, *text.winfo_children(), *([lbl_at] if lbl_at else [])):
+            for widget in (row, inner, text, title_row, lbl_title, *text.winfo_children(), *([lbl_at] if lbl_at else [])):
                 widget.bind("<Button-1>", lambda e: self.open_detail(task))
                 widget.bind("<Button-3>", lambda e: self._popup_task_menu(task, e))
                 widget.config(cursor="hand2")
@@ -3953,7 +4097,8 @@ class App(tk.Tk):
             width = row.winfo_width()
             if width < px(50):
                 return
-            lbl_title.config(wraplength=width - px(72) - (lbl_at.winfo_reqwidth() + px(12) if lbl_at else 0))
+            lbl_title.config(wraplength=width - px(72) - (lbl_at.winfo_reqwidth() + px(12) if lbl_at else 0)
+                             - (lbl_link.winfo_reqwidth() + px(6) if lbl_link else 0))
             row.itemconfigure(window, width=width - 2 * pad_x)
             inner.update_idletasks()
             height = inner.winfo_reqheight() + 2 * pad_y + gap
@@ -4145,6 +4290,7 @@ class App(tk.Tk):
                                          fg=TEXT, insertbackground=TEXT, highlightthickness=0),
             expand=True, pady=(px(2), 0), **pad)
         self.draft_notes.insert("1.0", draft["notes_draft"])
+        link_urls(self.draft_notes)
         tk.Label(view, text="子工作：建立後點這筆工作就能新增", bg=BG, fg=GRAY, font=SMALL,
                  anchor="w").pack(fill="x", pady=(px(10), 0), **pad)
 
@@ -4334,6 +4480,7 @@ class App(tk.Tk):
                                          fg=TEXT, insertbackground=TEXT, highlightthickness=0),
             expand=True, pady=(px(2), 0), **pad)
         self.detail_notes.insert("1.0", self.detail.get("notes_draft", task.get("notes", "")))
+        link_urls(self.detail_notes)
         if task.get("parent"):
             tk.Label(view, text="（這是子工作，在主畫面會顯示在父工作下方）", bg=BG, fg=GRAY, font=SMALL,
                      anchor="w").pack(fill="x", pady=(px(4), 0), **pad)
@@ -4953,7 +5100,7 @@ class App(tk.Tk):
         start, end = first - dt.timedelta(days=7), next_month + dt.timedelta(days=14)
         for ev in self.g.events(start, end):
             for day, when in event_days(ev):
-                events.setdefault(day, []).append((when, ev.get("summary") or "（無標題）"))
+                events.setdefault(day, []).append((when, ev.get("summary") or "（無標題）", event_info(ev)))
         today = now.date()
         # 今天完成的任務（含手機上完成的），給清單底部的「已完成」區塊
         midnight = dt.datetime.combine(today, dt.time())

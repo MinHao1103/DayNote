@@ -264,10 +264,17 @@ def wait_threads(app, timeout=5.0):
 _BASE_THREADS = threading.active_count()
 
 
+def card_of(label):
+    """標題所在的卡片（畫圓角底色的 Canvas，有 card_fill 屬性）；不依賴卡片內部有幾層容器。"""
+    widget = label
+    while not hasattr(widget, "card_fill"):
+        widget = widget.master
+    return widget
+
+
 def circle_of(app, title):
-    """清單中某筆任務的完成圓圈。"""
-    label = find_label(app.list_frame, title)
-    inner = label.master.master
+    """清單中某筆任務的完成圓圈（卡片內容最左邊的 Canvas）。"""
+    inner = card_of(find_label(app.list_frame, title)).winfo_children()[0]
     return next(w for w in inner.winfo_children() if isinstance(w, tk.Canvas))
 
 
@@ -808,6 +815,79 @@ class StartupTest(AppTestCase):
         self.assertEqual(app.tasks, [])
 
 
+class LinksAndEventsTest(AppTestCase):
+    """詳細資訊的網址可以點；點日曆行程看細節。"""
+
+    def test_event_card_shows_details_and_joins(self):
+        """點今天的行程 > 跳出細節（時間、地點）；按「加入會議」 > 開啟 Teams 連結並收起"""
+        # Given: 今天 15:00 的週會，說明有 Teams 連結
+        day = self.today.isoformat()
+        link = "https://teams.microsoft.com/l/meetup-join/abc"
+        self.g.events_by_cal["primary"].append(
+            {"summary": "專案週會", "start": {"dateTime": f"{day}T15:00:00"}, "end": {"dateTime": f"{day}T16:00:00"},
+             "location": "3F 會議室 A", "description": f"議程 {link}"})
+        app = self.start()
+        # When: 點行程卡片
+        click(find_label(app.list_frame, "專案週會"))
+        popup = app.event_popup
+        # Then: 細節
+        shown = texts(popup.win)
+        self.assertIn("今天 15:00 – 16:00", shown)
+        self.assertIn("3F 會議室 A", shown)
+        # When: 加入會議
+        with unittest.mock.patch.object(daynote.webbrowser, "open") as opened:
+            click(popup.btn_join)
+        # Then: 開連結、收起
+        opened.assert_called_once_with(link)
+        self.assertFalse(popup.win.winfo_exists())
+
+    def test_task_card_link_icon(self):
+        """詳細資訊有網址的待辦 > 標題旁有連結圖示，點了開網址（不進詳細頁）；沒網址的沒有圖示"""
+        # Given: 一筆附工單網址、一筆沒有
+        url = "https://redmine.example.com/issues/12345"
+        self.g.seed("修正登入逾時", self.today, notes=f"工單：{url}")
+        self.g.seed("買牛奶", self.today)
+        app = self.start()
+        card = card_of(find_label(app.list_frame, "修正登入逾時"))
+        icons = [w for w in daynote._descendants(card) if getattr(w, "cget", None) and w.winfo_class() == "Label"
+                 and w.cget("cursor") == "hand2" and w.cget("fg") == daynote.ACCENT]
+        plain = card_of(find_label(app.list_frame, "買牛奶"))
+        # When: 點連結圖示
+        with unittest.mock.patch.object(daynote.webbrowser, "open") as opened:
+            click(icons[0])
+        # Then: 開網址、沒開詳細頁；另一筆沒有圖示
+        opened.assert_called_once_with(url)
+        self.assertIsNone(app.detail)
+        self.assertFalse([w for w in daynote._descendants(plain) if w.winfo_class() == "Label"
+                          and w.cget("fg") == daynote.ACCENT])
+
+    def test_detail_notes_links_clickable(self):
+        """詳細頁的詳細資訊 > 網址標成連結；點網址 > 用瀏覽器開；打字加上新網址 > 也變成連結"""
+        # Given: 附規格書網址的待辦
+        url = "https://docs.example.com/spec/session-timeout"
+        self.g.seed("修正登入逾時", self.today, notes=f"規格書：{url}")
+        app = self.start()
+        app.open_detail(app.tasks[0])
+        app.update()
+        notes = app.detail_notes
+        # Then: 網址那段有 url 標記
+        start, end = notes.tag_ranges("url")[:2]
+        self.assertEqual(notes.get(start, end), url)
+        # When: 點網址
+        x, y, _, _ = notes.bbox(f"{start}+3c")
+        with unittest.mock.patch.object(daynote.webbrowser, "open") as opened:
+            notes.event_generate("<Motion>", x=x + 1, y=y + 1)  # 滑鼠先移過去（Tk 靠它判斷指到哪個標記）
+            notes.event_generate("<Button-1>", x=x + 1, y=y + 1)
+            app.update()
+        # Then: 開啟
+        opened.assert_called_once_with(url)
+        # When: 打字加上另一個網址
+        notes.insert("end", "\n工單 https://redmine.example.com/issues/1")
+        notes.mark_url()
+        # Then: 兩段都是連結
+        self.assertEqual(len(notes.tag_ranges("url")), 4)
+
+
 class SearchTest(AppTestCase):
     """主視窗搜尋（Ctrl+F）：所有未完成待辦，不限日期。"""
 
@@ -878,9 +958,7 @@ class DoneSectionTest(AppTestCase):
     """今天完成的待辦收在清單底部的「已完成」區塊，可以改回未完成。"""
 
     def done_circle(self, title):
-        label = find_label(self.app.list_frame, title)
-        inner = label.master.master
-        return next(w for w in inner.winfo_children() if isinstance(w, tk.Canvas))
+        return circle_of(self.app, title)
 
     def test_completed_task_listed_and_reopened(self):
         """完成待辦 > 出現在收合的「已完成（1）」；展開後點打勾圓圈 > 改回未完成，回到今天的清單"""
@@ -1854,7 +1932,7 @@ class CalendarTest(AppTestCase):
         app = self.start()
         app.update()
         label = find_label(app.list_frame, "寫週報")
-        row = label.master.master.master  # Label → 文字區 → 卡片內容 → 卡片 Canvas
+        row = card_of(label)
         # When: 滑鼠移入
         row.event_generate("<Enter>")
         app.update()
