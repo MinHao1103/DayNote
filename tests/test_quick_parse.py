@@ -102,6 +102,46 @@ class QuickDateTest(unittest.TestCase):
         self.assertEqual(result["due"], TODAY)
 
 
+class QuickMonthDateTest(unittest.TestCase):
+    """月底、15號、下個月5號、下下週一（今天 10/6 星期二）。"""
+
+    def test_month_phrases(self):
+        """月底／下個月底／15號／下個月5號／下下週一 > 換算成對應日期"""
+        cases = {"月底": D(2026, 10, 31), "這個月底": D(2026, 10, 31), "下個月底": D(2026, 11, 30),
+                 "15號": D(2026, 10, 15), "十五號": D(2026, 10, 15), "20日": D(2026, 10, 20),
+                 "下個月5號": D(2026, 11, 5), "下月10日": D(2026, 11, 10), "下下週一": D(2026, 10, 19),
+                 "下下週日": D(2026, 10, 25)}
+        for word, expected in cases.items():
+            with self.subTest(word=word):
+                # Given / When: 辨識
+                result = quick(f"{word} 繳費")
+                # Then: 日期正確、標題乾淨
+                self.assertEqual(result["due"], expected)
+                self.assertEqual(result["title"], "繳費")
+
+    def test_day_passed_moves_to_next_month(self):
+        """今天 10/6 寫「5號」 > 這個月的 5 號已經過了，排到 11/5"""
+        # Given / When: 辨識
+        result = quick("5號 繳費")
+        # Then: 下個月
+        self.assertEqual(result["due"], D(2026, 11, 5))
+
+    def test_missing_day_skips_short_month(self):
+        """10/31 寫「31號」 > 就是今天；11/1 寫「31號」 > 11 月沒有 31 日，排到 12/31"""
+        # Given / When: 月底那天與下個月第一天各辨識一次
+        on_31 = daynote.parse_quick("31號 結帳", LISTS, D(2026, 10, 31), NOW)
+        on_1 = daynote.parse_quick("31號 結帳", LISTS, D(2026, 11, 1), NOW)
+        # Then: 今天、12/31
+        self.assertEqual((on_31["due"], on_1["due"]), (D(2026, 10, 31), D(2026, 12, 31)))
+
+    def test_number_inside_title_not_date(self):
+        """「1號電池」「下個月 出國」 > 不是完整日期，留在標題"""
+        # Given / When: 含日期字的標題
+        result = quick("買 1號電池 下個月 出國")
+        # Then: 都留在標題、日期是今天
+        self.assertEqual((result["due"], result["title"]), (TODAY, "買 1號電池 下個月 出國"))
+
+
 class QuickRelativeNumberTest(unittest.TestCase):
 
     def test_chinese_numeral_days_and_weeks(self):

@@ -1322,10 +1322,15 @@ _QUICK_DATE_RE = re.compile(
     r"^(?:(?P<rel>今天|今日|明天|明日|大後天|後天)"
     r"|(?P<ndays>\d{1,2}|" + _CN_NUM + r")天後"
     r"|(?P<nweeks>\d|[一二兩三四])(?:個)?" + _WEEK_WORD + r"後"
+    r"|下下" + _WEEK_WORD + r"(?P<next2day>[一二三四五六日天])"
     r"|(?P<next>下)" + _WEEK_WORD + r"(?P<nextday>[一二三四五六日天])"
     r"|這?" + _WEEK_WORD + r"(?P<thisday>[一二三四五六日天])"
     r"|(?P<m1>\d{1,2})/(?P<d1>\d{1,2})"
     r"|(?P<m2>\d{1,2})月(?P<d2>\d{1,2})[日號]?"
+    r"|(?P<monthend>(?:這個?)?月底)"
+    r"|(?P<nextmonthend>下個?月底)"
+    r"|下個?月(?P<nextmonthday>\d{1,2}|" + _CN_NUM + r")[日號]"
+    r"|(?P<dayonly>\d{1,2}|" + _CN_NUM + r")[日號]"
     r"|(?P<none>無日期|不排日期))")
 _QUICK_TIME_RE = re.compile(
     r"^(?P<period>凌晨|上午|早上|中午|下午|晚上|今晚)?"
@@ -1338,8 +1343,42 @@ _RELATIVE_DAYS = {"今天": 0, "今日": 0, "明天": 1, "明日": 1, "後天": 
 NO_DATE = "no-date"  # 使用者明確寫了「無日期」
 
 
+def _month_day(year, month, day):
+    """某年某月的第 day 天；那個月沒有這一天（例如 11/31）回傳 None。month 可超過 12（自動進到隔年）。"""
+    year, month = year + (month - 1) // 12, (month - 1) % 12 + 1
+    try:
+        return dt.date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _month_end(year, month):
+    year, month = year + (month - 1) // 12, (month - 1) % 12 + 1
+    return dt.date(year, month, calendar.monthrange(year, month)[1])
+
+
 def _quick_date(match, today):
-    """把日期片段換算成日期；無效日期（例如 2/30）回傳 None，「無日期」回傳 NO_DATE。"""
+    """把日期片段換算成日期；無效日期（例如 2/30）回傳 None，「無日期」回傳 NO_DATE。
+
+    月底＝這個月最後一天；15號＝這個月 15 日，已經過了就是下個月（下個月沒有這一天就再往後找）；
+    下個月5號、下個月底、下下週一。
+    """
+    if match.group("next2day"):
+        next_monday = today + dt.timedelta(days=7 - today.weekday())
+        return next_monday + dt.timedelta(days=7 + _DAY_CHARS[match.group("next2day")])
+    if match.group("monthend"):
+        return _month_end(today.year, today.month)
+    if match.group("nextmonthend"):
+        return _month_end(today.year, today.month + 1)
+    if match.group("nextmonthday"):
+        return _month_day(today.year, today.month + 1, _cn_number(match.group("nextmonthday")) or 0)
+    if match.group("dayonly"):
+        day = _cn_number(match.group("dayonly")) or 0
+        for ahead in range(12):  # 這個月已經過了（或沒有這一天）就往後找
+            candidate = _month_day(today.year, today.month + ahead, day)
+            if candidate and candidate >= today:
+                return candidate
+        return None
     if match.group("rel"):
         return today + dt.timedelta(days=_RELATIVE_DAYS[match.group("rel")])
     if match.group("ndays"):
@@ -1411,7 +1450,8 @@ def parse_quick(text, lists, today, now, default_due=None):
     """把快速列輸入的一行文字辨識成待辦，以空白分段，辨識不出來的片段留在標題。
 
     回傳 {"title", "due", "time", "recur", "list"}；list 為 None 時由呼叫端用上次的清單。
-    - 日期：今天、明天、後天、3天後、三天後、一週後、週五、下週一、10/15、10月15日、無日期
+    - 日期：今天、明天、後天、3天後、三天後、一週後、週五、下週一、下下週一、10/15、10月15日、15號、
+      月底、下個月5號、下個月底、無日期
     - 時間：15:30、3點、3點半、下午3點15分、下午三點、凌晨2點（沒寫上午下午時 1～6 點視為下午）；
       只寫時段：早上 9:00、中午 12:00、下午 15:00、晚上 20:00
     - 重複：每天、平日、每週一三五、每月15日、每月最後一天、每年3/15
