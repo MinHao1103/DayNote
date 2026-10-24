@@ -3503,6 +3503,11 @@ class App(tk.Tk):
         self.lbl_day.pack(side="left")
         meta = tk.Frame(self.hero, bg=BG)
         meta.pack(side="left", padx=(px(12), 0))
+        # 清單篩選：只看某個清單的待辦（日曆行程照常顯示）；選擇記在 state.json
+        self.btn_filter = Pill(self.hero, self._filter_label(), self._open_filter_menu, style="soft", font=SMALL,
+                               padx=10, pady=3)
+        self.btn_filter.pack(side="right", anchor="s", padx=(0, px(8)), pady=(0, px(6)))
+        Tooltip(self.btn_filter, "只看某個清單的待辦（日曆行程照常顯示）")
         self.lbl_weekday = tk.Label(meta, font=HEADING_FONT, bg=BG, fg=TEXT, anchor="w")
         self.lbl_weekday.pack(fill="x")
         self.lbl_relative = tk.Label(meta, font=SMALL, bg=BG, fg=GRAY, anchor="w")
@@ -3669,7 +3674,7 @@ class App(tk.Tk):
         text = ""
         if self.g.refresh_token and self.selected == self.today:
             items = [(parse_time_text(when), title) for when, title, _ in self.events.get(self.today, [])]
-            items += [(t["time"], t["title"]) for t in self.tasks if t["due"] == self.today and t.get("time")]
+            items += [(t["time"], t["title"]) for t in self._shown(self.tasks) if t["due"] == self.today and t.get("time")]
             text = next_up_text([(at, title) for at, title in items if at], self._now())
         self.lbl_next.config(text=text)
         if text:
@@ -3697,7 +3702,7 @@ class App(tk.Tk):
                           fill=HOLIDAY_RED if weekend else GRAY, font=SMALL)
 
         # 子任務跟著父任務，月曆圓點只看最上層任務的日期
-        task_days = {t["due"] for t in self._top_level() if t["due"]}
+        task_days = {t["due"] for t in self._shown(self._top_level()) if t["due"]}
         self.weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(year, month)
         if self.compact:
             self.weeks = [w for w in self.weeks if self.selected in w] or self.weeks[:1]
@@ -3765,7 +3770,7 @@ class App(tk.Tk):
             return
         day = self.selected
         events = self.events.get(day, [])
-        top_level = self._top_level()
+        top_level = self._shown(self._top_level())
         # 有時間的排前面並依時間排序，其餘依 Google Tasks 的順序
         tasks = sorted((t for t in top_level if t["due"] == day),
                        key=lambda t: (t.get("time") is None, t.get("time") or dt.time(), self._order_key(t)))
@@ -3800,7 +3805,8 @@ class App(tk.Tk):
                 self._card(event[1], "Google 日曆", None, at=event[0], event=event[2])
         for task in previews:
             self._preview_card(task)
-        done = sorted(self.done_today, key=lambda t: t["completed"] or dt.datetime.min) if day == self.today else []
+        done = (sorted(self._shown(self.done_today), key=lambda t: t["completed"] or dt.datetime.min)
+                if day == self.today else [])
         if not events and not tasks and not previews and done:
             tk.Label(self.list_frame, text="今天的待辦都完成了", bg=BG, fg=GRAY, font=FONT).pack(pady=(px(14), px(8)))
         elif not events and not tasks and not previews:
@@ -3911,7 +3917,7 @@ class App(tk.Tk):
         top = self._top_level()
         real = {(t["due"], t["title"], t.get("recur")) for t in top if t["due"]}
         previews = {}
-        for task in top:
+        for task in self._shown(top):
             for day in upcoming_days(task, start, end, today):
                 if (day, task["title"], task["recur"]) not in real:
                     previews.setdefault(day, []).append(task)
@@ -3995,6 +4001,53 @@ class App(tk.Tk):
         """最上層任務：沒有 parent，或 parent 不在未完成清單中（父任務已完成時，子任務照常顯示）。"""
         ids = {t["id"] for t in self.tasks}
         return [t for t in self.tasks if not t.get("parent") or t["parent"] not in ids]
+
+    def _list_filter(self):
+        """目前篩選的清單 id；沒有篩選或清單已不存在時回傳 None（顯示全部）。"""
+        list_id = self.state_data.get("list_filter")
+        return list_id if any(lst["id"] == list_id for lst in self.lists) else None
+
+    def _shown(self, tasks):
+        """依清單篩選留下要顯示的任務（子工作跟著父工作，同一個清單）。"""
+        list_id = self._list_filter()
+        return [t for t in tasks if t["list_id"] == list_id] if list_id else list(tasks)
+
+    def _filter_label(self):
+        list_id = self._list_filter()
+        name = next((lst.get("title", "") for lst in self.lists if lst["id"] == list_id), None)
+        return f"📁 {name} ▾" if name else "📁 全部清單 ▾"
+
+    def _open_filter_menu(self):
+        """清單篩選選單：全部清單＋每個清單，目前的打勾。"""
+        menu = self.filter_menu = PopupMenu(self)
+        current = self._list_filter()
+        menu.add_command(label="全部清單", command=lambda: self.set_list_filter(None), checked=current is None)
+        menu.add_separator()
+        for lst in self.lists:
+            menu.add_command(label=lst.get("title", ""), command=lambda i=lst["id"]: self.set_list_filter(i),
+                             checked=lst["id"] == current)
+        btn = self.btn_filter
+        menu.tk_popup(btn.winfo_rootx() + btn.winfo_width(), btn.winfo_rooty() + btn.winfo_height() + px(4),
+                      align="right")
+
+    def set_list_filter(self, list_id):
+        """只看 list_id 清單（None＝全部），記住選擇並重畫。"""
+        self.state_data["list_filter"] = list_id
+        save_state(self.state_data)
+        self._refresh_filter_button()
+        self.redraw()
+
+    def _refresh_filter_button(self):
+        """篩選膠囊的文字跟著清單名稱與選擇更新（Pill 建立後不能改字，重建一顆）。"""
+        if not getattr(self, "btn_filter", None) or not self.btn_filter.winfo_exists():
+            return
+        if self.btn_filter.text_value == self._filter_label():
+            return
+        self.btn_filter.destroy()
+        self.btn_filter = Pill(self.hero, self._filter_label(), self._open_filter_menu, style="soft", font=SMALL,
+                               padx=10, pady=3)
+        self.btn_filter.pack(side="right", anchor="s", padx=(0, px(8)), pady=(0, px(6)))
+        Tooltip(self.btn_filter, "只看某個清單的待辦（日曆行程照常顯示）")
 
     def _children(self, task):
         return sorted((t for t in self.tasks if t.get("parent") == task["id"]),
@@ -4781,7 +4834,7 @@ class App(tk.Tk):
     def _day_tip_text(self, day):
         if day is None:
             return ""
-        tasks = sum(1 for t in self._top_level() if t["due"] == day)
+        tasks = sum(1 for t in self._shown(self._top_level()) if t["due"] == day)
         previews = len(self._previews(day, day).get(day, []))
         return day_summary(day, self.today, tasks, previews, len(self.events.get(day, [])),
                            self.holidays.get(day, []))
@@ -5166,6 +5219,7 @@ class App(tk.Tk):
             self._save_reminder_state()
         self._show_login_button(False)
         self._select_remembered_list()
+        self._refresh_filter_button()
         self.synced_text = f"已同步 {dt.datetime.now():%H:%M}"
         self._set_status(self.synced_text)
         self._show_first_run_tip()

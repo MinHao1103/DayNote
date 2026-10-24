@@ -888,6 +888,61 @@ class LinksAndEventsTest(AppTestCase):
         self.assertEqual(len(notes.tag_ranges("url")), 4)
 
 
+class ListFilterTest(AppTestCase):
+    """大日期右邊的「📁 全部清單 ▾」：只看某個清單的待辦。"""
+
+    def test_filter_to_one_list(self):
+        """選「工作」 > 只剩工作清單的待辦，日曆行程照常顯示；日期提示只算工作；選擇記在 state.json"""
+        # Given: 工作、個人各一筆，今天還有一個行程
+        self.g.seed("寫週報", self.today, list_id="L1")
+        self.g.seed("買牛奶", self.today, list_id="L2")
+        day = self.today.isoformat()
+        self.g.events_by_cal["primary"].append(
+            {"summary": "週會", "start": {"dateTime": f"{day}T15:00:00"}, "end": {"dateTime": f"{day}T16:00:00"}})
+        app = self.start()
+        self.assertEqual(app.btn_filter.text_value, "📁 全部清單 ▾")
+        # When: 選單選「工作」
+        app._open_filter_menu()
+        app.update()
+        app.filter_menu.invoke("工作")
+        app.update()
+        # Then: 只剩工作，行程還在，按鈕顯示工作
+        shown = self.list_texts()
+        self.assertIn("寫週報", shown)
+        self.assertNotIn("買牛奶", shown)
+        self.assertIn("週會", shown)
+        self.assertEqual(app.btn_filter.text_value, "📁 工作 ▾")
+        self.assertIn("1 件待辦", app._day_tip_text(self.today))
+        with open(os.path.join(self.tmp, "state.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["list_filter"], "L1")
+
+    def test_back_to_all_lists(self):
+        """篩選後選「全部清單」 > 兩個清單的待辦都回來"""
+        # Given: 已篩選工作
+        self.g.seed("寫週報", self.today, list_id="L1")
+        self.g.seed("買牛奶", self.today, list_id="L2")
+        app = self.start()
+        app.set_list_filter("L1")
+        # When: 全部清單
+        app.set_list_filter(None)
+        # Then: 都在
+        shown = self.list_texts()
+        self.assertIn("寫週報", shown)
+        self.assertIn("買牛奶", shown)
+        self.assertEqual(app.btn_filter.text_value, "📁 全部清單 ▾")
+
+    def test_missing_list_shows_all(self):
+        """記住的清單已被刪除（例如在手機刪掉） > 顯示全部，不會整個清空"""
+        # Given: state.json 記著不存在的清單
+        self.g.seed("寫週報", self.today, list_id="L1")
+        app = self.start()
+        app.state_data["list_filter"] = "deleted-list"
+        app.redraw()
+        # Then: 照常顯示
+        self.assertIn("寫週報", self.list_texts())
+        self.assertIsNone(app._list_filter())
+
+
 class SearchTest(AppTestCase):
     """主視窗搜尋（Ctrl+F）：所有未完成待辦，不限日期。"""
 
