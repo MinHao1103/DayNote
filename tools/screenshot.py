@@ -229,7 +229,7 @@ def open_page(app, g, page, today):
         if page == "datepicker":
             picker = daynote.DatePicker(app, anchor, task["due"], lambda d: None)
         elif page == "timepicker":
-            picker = daynote.TimePicker(app, anchor, task["time"], lambda t: None)
+            picker = daynote.TimePicker(app, anchor, task["time"], lambda t: None, lead=10, on_lead=lambda v: None)
         else:
             picker = daynote.RecurPicker(app, anchor, None, task["due"], lambda r: None)
         return picker.win

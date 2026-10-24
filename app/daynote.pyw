@@ -107,6 +107,8 @@ REMINDER_SNOOZE_MIN = 10
 REMINDER_SNOOZE_MORE_MIN = (30, 60)    # 延後下拉選單的其他選項（分鐘）
 REMINDER_TOMORROW_AT = dt.time(9, 0)   # 延後下拉選單「明天早上」的時間
 REMINDER_MAX_LATE_H = 24         # 錯過超過 24 小時的提醒不再補跳
+REMINDER_LEADS = (5, 10, 15, 30, 60)   # 提前提醒可選的分鐘數
+REMIND_LATER_EVENING = dt.time(17, 0)  # 右鍵「稍後提醒」的「今天下班前」
 NEXT_UP_TICK_MS = 60 * 1000      # 「下一件」摘要每分鐘更新
 FIRST_RUN_TIP = "小技巧：在待辦上按右鍵可以改日期；Ctrl + Alt + D 隨時快速新增"  # 第一次同步成功後在狀態列提示一次
 FIRST_RUN_TIP_MS = 15 * 1000
@@ -960,7 +962,8 @@ class Google:
 # ---- 任務時間與週期：Google Tasks API 不能存時間與重複規則，改存在詳細資訊開頭
 #      「⏰ 15:00」「🔁 每週一」（方案 B）；手機上看得到，也可以直接在手機輸入
 
-_TIME_LINE = re.compile(r"^\s*⏰️?\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
+# 「⏰ 15:00」或「⏰ 15:00 提前10分鐘」（提前提醒，手機上看也看得懂）
+_TIME_LINE = re.compile(r"^\s*⏰️?\s*([01]?\d|2[0-3]):([0-5]\d)(?:\s*提前\s*(\d{1,4})\s*分(?:鐘)?)?\s*$")
 _RECUR_LINE = re.compile(r"^\s*🔁️?\s*(.+?)\s*$")
 LAST_DAY = -1  # 每月最後一天
 
@@ -1082,11 +1085,37 @@ def split_meta(notes):
     return time_value, rule, "\n".join(lines[index:]).lstrip("\n")
 
 
-def join_meta(time_value, rule, body):
-    """把時間與重複規則放回詳細資訊開頭（固定 ⏰ 在前、🔁 在後）；都沒有時只回傳內文。"""
+def reminder_lead(notes):
+    """詳細資訊開頭 ⏰ 那行寫的「提前幾分鐘提醒」；沒寫（準時提醒）回傳 None。"""
+    for line in (notes or "").split("\n"):
+        match = _TIME_LINE.match(line)
+        if match:
+            minutes = int(match.group(3) or 0)
+            return minutes or None
+        if not _RECUR_LINE.match(line):
+            return None
+    return None
+
+
+def lead_text(lead):
+    """提前提醒的說明：提前10分鐘、提前1小時；None＝準時。"""
+    if not lead:
+        return "準時"
+    return f"提前{lead // 60}小時" if lead % 60 == 0 else f"提前{lead}分鐘"
+
+
+def reminder_at(task):
+    """這筆待辦要在什麼時候跳提醒（日期＋時間，減掉提前的分鐘數）；沒有日期或時間回傳 None。"""
+    if not (task.get("time") and task.get("due")):
+        return None
+    return dt.datetime.combine(task["due"], task["time"]) - dt.timedelta(minutes=task.get("lead") or 0)
+
+
+def join_meta(time_value, rule, body, lead=None):
+    """把時間與重複規則放回詳細資訊開頭（固定 ⏰ 在前、🔁 在後）；都沒有時只回傳內文。lead＝提前幾分鐘提醒。"""
     head = []
     if time_value:
-        head.append(f"⏰ {time_value:%H:%M}")
+        head.append(f"⏰ {time_value:%H:%M}" + (f" 提前{lead}分鐘" if lead else ""))
     if rule:
         head.append(f"🔁 {format_recur(rule)}")
     return "\n".join(head + ([body] if body else [])) if head else body
@@ -1150,7 +1179,7 @@ def next_task_for(task, today):
         return None
     return {"list_id": task["list_id"], "title": task["title"],
             "due": next_due(task["recur"], task["due"], today),
-            "notes": join_meta(task.get("time"), task["recur"], task.get("notes", ""))}
+            "notes": join_meta(task.get("time"), task["recur"], task.get("notes", ""), task.get("lead"))}
 
 
 def can_skip(task):
@@ -1183,7 +1212,7 @@ def spawn_next(google, task, plan, include_deleted=False):
     return {"id": created["id"], "title": created.get("title") or plan["title"],
             "list_id": task["list_id"], "list_title": task.get("list_title", ""),
             "due": task_due(created) or plan["due"], "parent": None, "time": task.get("time"),
-            "recur": task["recur"], "notes": task.get("notes", ""), "position": created.get("position", "")}
+            "lead": task.get("lead"), "recur": task["recur"], "notes": task.get("notes", ""), "position": created.get("position", "")}
 
 
 def reminder_key(task_id, when):
@@ -1193,11 +1222,10 @@ def reminder_key(task_id, when):
 
 def mark_past_reminder(reminded, task, now):
     """新建的一期若提醒時間已過，直接記為已提醒，避免剛完成就跳出同一件事的提醒。有標記時回傳 True。"""
-    if not (task.get("time") and task.get("due")):
+    fire_at = reminder_at(task)
+    if fire_at is None or fire_at > now:
         return False
     when = dt.datetime.combine(task["due"], task["time"])
-    if when > now:
-        return False
     reminded.add(reminder_key(task["id"], when))
     return True
 
@@ -1230,6 +1258,7 @@ def apply_fields(task, fields):
         task["title"] = fields["title"]
     if "notes" in fields:
         task["time"], task["recur"], task["notes"] = split_meta(fields["notes"])
+        task["lead"] = reminder_lead(fields["notes"])
     if "due" in fields:
         task["due"] = task_due({"due": fields["due"]})
 
@@ -1240,7 +1269,8 @@ def restore_fields(before, fields):
     if "due" in fields:
         restored["due"] = due_field(before["due"])
     if "notes" in fields:
-        restored["notes"] = join_meta(before.get("time"), before.get("recur"), before.get("notes", ""))
+        restored["notes"] = join_meta(before.get("time"), before.get("recur"), before.get("notes", ""),
+                                      before.get("lead"))
     if "title" in fields:
         restored["title"] = before["title"]
     return restored
@@ -1271,6 +1301,13 @@ def time_text(time_value):
     return f"{time_value:%H:%M}" if time_value else ""
 
 
+def reminder_text(time_value, lead):
+    """提醒時間的說明：15:00、15:00 · 提前10分鐘；沒有時間回傳空字串。"""
+    if not time_value:
+        return ""
+    return time_text(time_value) + (f" · {lead_text(lead)}" if lead else "")
+
+
 def is_late(task, now):
     """今天的待辦、提醒時間已過但還沒完成時回傳 True（以分鐘為單位，同一分鐘內不算過）。
 
@@ -1294,6 +1331,37 @@ def snooze_options(now):
                for m in (REMINDER_SNOOZE_MIN, *REMINDER_SNOOZE_MORE_MIN)]
     tomorrow = dt.datetime.combine(now.date() + dt.timedelta(days=1), REMINDER_TOMORROW_AT)
     options.append((f"明天 {REMINDER_TOMORROW_AT.hour}:{REMINDER_TOMORROW_AT:%M}", tomorrow))
+    return options
+
+
+# SHQueryUserNotificationState：有全螢幕程式（簡報、影片、遊戲）或開了簡報模式時，Windows 自己的通知也會先壓著
+QUNS_QUIET_STATES = (2, 3, 4)  # QUNS_BUSY、QUNS_RUNNING_D3D_FULL_SCREEN、QUNS_PRESENTATION_MODE
+
+
+def presenting():
+    """目前是否在全螢幕或簡報模式：提醒先別跳出來，免得分享畫面時被大家看到。查不到時當作沒有。"""
+    state = ctypes.c_int()
+    try:
+        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
+            return False
+    except (AttributeError, OSError):
+        return False
+    return state.value in QUNS_QUIET_STATES
+
+
+def remind_later_options(now):
+    """右鍵「稍後提醒」的選項 [(選單文字, 提醒時間)]：1 小時後（進位到 5 分鐘）、今天 17:00（還有一小時以上才列）、明天 9:00。
+
+    @param now 目前時間（dt.datetime）
+    """
+    in_hour = (now + dt.timedelta(minutes=60)).replace(second=0, microsecond=0)
+    in_hour += dt.timedelta(minutes=-in_hour.minute % 5)
+    options = [("1 小時後提醒", in_hour)]
+    evening = dt.datetime.combine(now.date(), REMIND_LATER_EVENING)
+    if evening - now >= dt.timedelta(hours=1) and evening != in_hour:
+        options.append((f"今天 {REMIND_LATER_EVENING:%H:%M} 提醒", evening))
+    tomorrow = dt.datetime.combine(now.date() + dt.timedelta(days=1), REMINDER_TOMORROW_AT)
+    options.append((f"明天 {REMINDER_TOMORROW_AT.hour}:{REMINDER_TOMORROW_AT:%M} 提醒", tomorrow))
     return options
 
 
@@ -1455,21 +1523,42 @@ def _quick_token(token, today):
     return due, time_value
 
 
+_QUICK_LEAD_RE = re.compile(r"^提前(?:(半)小時|(\d{1,3}|[一二兩三四五六七八九十]+)(分鐘?|小時))$")
+
+
+def _quick_lead(token):
+    """「提前10分」「提前十分鐘」「提前半小時」「提前1小時」→ 分鐘數；不是這種寫法回傳 None。"""
+    match = _QUICK_LEAD_RE.match(token)
+    if not match:
+        return None
+    if match.group(1):
+        return 30
+    number = _cn_number(match.group(2))
+    if not number:
+        return None
+    return number * 60 if match.group(3) == "小時" else number
+
+
 def parse_quick(text, lists, today, now, default_due=None):
     """把快速列輸入的一行文字辨識成待辦，以空白分段，辨識不出來的片段留在標題。
 
-    回傳 {"title", "due", "time", "recur", "list"}；list 為 None 時由呼叫端用上次的清單。
+    回傳 {"title", "due", "time", "lead", "recur", "list"}；list 為 None 時由呼叫端用上次的清單。
     - 日期：今天、明天、後天、3天後、三天後、一週後、週五、下週一、下下週一、10/15、10月15日、15號、
       月底、下個月5號、下個月底、無日期
     - 時間：15:30、3點、3點半、下午3點15分、下午三點、凌晨2點（沒寫上午下午時 1～6 點視為下午）；
       只寫時段：早上 9:00、中午 12:00、下午 15:00、晚上 20:00
     - 重複：每天、平日、每週一三五、每月15日、每月最後一天、每年3/15
     - 清單：#清單名稱（開頭相符、不分大小寫）
+    - 提前提醒：提前10分、提前十分鐘、提前半小時、提前1小時（要有時間才算，否則留在標題）
     沒寫日期時以 default_due 為準（主畫面＝月曆選中的那天；快速列＝今天）：
     只有時間：那天是今天且時間已經過了就改明天；只有重複規則：從那天起第一個符合的日子；什麼都沒寫：那天。
     """
     title, due, due_set, time_value, rule, target = [], None, False, None, None, None
+    lead, lead_token = None, None
     for token in text.split():
+        if lead is None and _quick_lead(token):
+            lead, lead_token = _quick_lead(token), token
+            continue
         if token.startswith("#") and len(token) > 1 and target is None:
             name = token[1:].lower()
             found = next((lst for lst in lists if lst.get("title", "").lower() == name), None) or next(
@@ -1499,7 +1588,10 @@ def parse_quick(text, lists, today, now, default_due=None):
             due = base
     if due is None:  # 沒有日期就不能提醒，也不能重複
         time_value, rule = None, None
-    return {"title": " ".join(title), "due": due, "time": time_value, "recur": rule, "list": target}
+    if lead and not time_value:  # 沒有時間就沒有「提前」可言：留在標題，讓使用者看到沒被辨識
+        title.append(lead_token)
+        lead = None
+    return {"title": " ".join(title), "due": due, "time": time_value, "lead": lead, "recur": rule, "list": target}
 
 
 def _notes_preview(notes, limit=24):
@@ -2131,8 +2223,8 @@ def completed_task(raw, lst):
                  if isinstance(stamp, str) and stamp else None)
     return {"id": raw["id"], "title": raw.get("title") or "（無標題）", "list_id": lst["id"],
             "list_title": lst.get("title", ""), "due": task_due(raw), "parent": raw.get("parent"),
-            "time": time_value, "recur": rule, "notes": notes, "position": raw.get("position", ""),
-            "completed": completed}
+            "time": time_value, "lead": reminder_lead(raw.get("notes", "")), "recur": rule, "notes": notes,
+            "position": raw.get("position", ""), "completed": completed}
 
 
 def backfill_recurring(google, lists, since, today):
@@ -2155,7 +2247,7 @@ def backfill_recurring(google, lists, since, today):
                 continue
             task = {"id": raw["id"], "title": raw.get("title") or "", "list_id": lst["id"],
                     "list_title": lst.get("title", ""), "due": task_due(raw), "parent": None,
-                    "time": time_value, "recur": rule, "notes": body}
+                    "time": time_value, "lead": reminder_lead(raw.get("notes")), "recur": rule, "notes": body}
             try:
                 created = spawn_next(google, task, next_task_for(task, today), include_deleted=True)
             except ApiError:
@@ -2418,11 +2510,16 @@ class DatePicker(_Popup):
 
 
 class TimePicker(_Popup):
-    """提醒時間選擇器：自訂（HH:MM，Enter 確認）＋不設時間。不提供預設時間（使用者要求）。"""
+    """提醒時間選擇器：自訂（HH:MM，Enter 確認）＋不設時間。不提供預設時間（使用者要求）。
 
-    def __init__(self, app, anchor, current, on_pick):
+    有 on_lead 時多一排「提前」：準時、5／10／15／30 分鐘、1 小時；點了連同時間一起套用。
+    """
+
+    def __init__(self, app, anchor, current, on_pick, lead=None, on_lead=None):
         self.on_pick = on_pick
         self.current = current
+        self.lead = lead
+        self.on_lead = on_lead
         super().__init__(app, anchor)
         self.custom.focus_set()  # 打開就能直接輸入時間
 
@@ -2441,9 +2538,31 @@ class TimePicker(_Popup):
         # 一打開就說明輸入方式；輸入錯誤時同一行改成紅字
         self.hint = tk.Label(self.body, text=self.HINT, bg=CARD_BG, fg=GRAY, font=SMALL, anchor="w")
         self.hint.pack(fill="x", pady=(0, px(6)))
+        if self.on_lead:
+            # 提前提醒：開會前先有時間準備；目前選的那個用實心膠囊
+            leads = tk.Frame(self.body, bg=CARD_BG)
+            leads.pack(fill="x", pady=(0, px(6)))
+            tk.Label(leads, text="提前", bg=CARD_BG, fg=GRAY, font=SMALL).pack(side="left", padx=(0, px(4)))
+            self.lead_chips = {}
+            for lead in (None, *REMINDER_LEADS):
+                label = "準時" if not lead else f"{lead // 60}小時" if lead % 60 == 0 else f"{lead}分"
+                chip = self._chip(leads, label, lambda v=lead: self._pick_lead(v),
+                                  style="primary" if lead == self.lead else "soft")
+                chip.pack(side="left", padx=(0, px(3)))
+                self.lead_chips[lead] = chip
         self._chip(self.body, "不設時間", lambda: self.pick(None), style="ghost").pack(anchor="w")
 
     HINT = "例如 11、15:30、下午3點，按 Enter 確定"
+
+    def _pick_lead(self, lead):
+        """選提前多久：連同輸入框的時間一起套用（還沒填時間就提示先填）。"""
+        text = self.custom.get().strip()
+        value = parse_time_text(text) if text else None
+        if value is None:
+            self.hint.config(text=("看不懂這個時間。" if text else "請先輸入時間。") + self.HINT, fg=RED)
+            return
+        self.on_lead(lead)
+        self.pick(value)
 
     def _pick_custom(self):
         value = parse_time_text(self.custom.get())
@@ -2543,6 +2662,8 @@ class ReminderToast:
 
         late = (dt.datetime.now() - when).total_seconds() // 60
         when_text = f"⏰ {when:%H:%M}" + (f"（已過 {int(late)} 分鐘）" if late >= 2 else "")
+        if late < 0:  # 提前提醒：還沒開始，寫出還有多久
+            when_text = f"⏰ {when:%H:%M}（{int(-late)} 分鐘後）"
         if when.date() != dt.date.today():
             when_text = f"⏰ {when.month}/{when.day} {when:%H:%M}"
         tk.Label(body, text=when_text, bg=BG, fg=ACCENT, font=FONT, anchor="w").pack(fill="x", pady=(px(6), 0))
@@ -2763,7 +2884,7 @@ class QuickBar:
         lst = parsed["list"] or self.app.current_list()
         parts = [f"📅 {date_text(parsed['due'])}"]
         if parsed["time"]:
-            parts.append(f"⏰ {time_text(parsed['time'])}")
+            parts.append(f"⏰ {reminder_text(parsed['time'], parsed['lead'])}")
         if parsed["recur"]:
             parts.append(f"🔁 {format_recur(parsed['recur'])}")
         if lst:
@@ -2842,7 +2963,8 @@ class QuickBar:
             self.app.redraw()
             self.app._set_status(f"已新增「{task['title']}」到「{lst.get('title', '')}」")
             self.close()
-        self.app._create_task(parsed["title"], parsed["due"], parsed["time"], parsed["recur"], lst, done)
+        self.app._create_task(parsed["title"], parsed["due"], parsed["time"], parsed["recur"], lst, done,
+                              lead=parsed["lead"])
 
     def complete(self, task):
         self.app.complete(task)
@@ -4469,7 +4591,7 @@ class App(tk.Tk):
         lst = parsed["list"] or self.current_list()
         parts = [f"📅 {date_text(parsed['due'])}"]
         if parsed["time"]:
-            parts.append(f"⏰ {time_text(parsed['time'])}")
+            parts.append(f"⏰ {reminder_text(parsed['time'], parsed['lead'])}")
         if parsed["recur"]:
             parts.append(f"🔁 {format_recur(parsed['recur'])}")
         if lst:
@@ -4495,13 +4617,14 @@ class App(tk.Tk):
                              else "尚未讀到任何清單，請先同步", error=True)
             return
         list_index = self.lists.index(self.current_list())
-        due, time_value, rule = self.new_due, None, None
+        due, time_value, rule, lead = self.new_due, None, None, None
         if title:  # 底部輸入框已經打了「明天 3點 開會」：先辨識，日期時間填進欄位，標題只留文字
             parsed = parse_quick(title, self.lists, dt.date.today(), self._now(), default_due=self.new_due)
             title, due, time_value, rule = parsed["title"], parsed["due"], parsed["time"], parsed["recur"]
+            lead = parsed["lead"]
             if parsed["list"]:
                 list_index = self.lists.index(parsed["list"])
-        self.draft = {"title_draft": title, "notes_draft": "", "due": due, "time": time_value,
+        self.draft = {"title_draft": title, "notes_draft": "", "due": due, "time": time_value, "lead": lead,
                       "recur": rule, "list_index": list_index, "busy": False}
         self._hide_undo()
         self.main_view.pack_forget()
@@ -4536,9 +4659,10 @@ class App(tk.Tk):
         btn_due = Pill(row, f"📅 {date_text(draft['due'])} ▾",
                        lambda: DatePicker(self, btn_due, draft["due"], self._set_draft_due), style="soft", padx=10, pady=3)
         btn_due.pack(side="left", padx=(0, px(6)))
-        at = time_text(draft["time"])
+        at = reminder_text(draft["time"], draft["lead"])
         btn_time = Pill(row, f"⏰ {at} ▾" if at else "⏰ 加提醒時間 ▾",
-                        lambda: TimePicker(self, btn_time, draft["time"], self._set_draft_time),
+                        lambda: TimePicker(self, btn_time, draft["time"], self._set_draft_time, lead=draft["lead"],
+                                           on_lead=lambda v: draft.update(lead=v)),
                         style="soft", padx=10, pady=3)
         btn_time.pack(side="left")
         row_recur = self._prop_row(view, "重複", pad, top=px(6))
@@ -4623,6 +4747,8 @@ class App(tk.Tk):
 
     def _set_draft_time(self, value):
         self.draft["time"] = value
+        if value is None:
+            self.draft["lead"] = None
         if value and self.draft["due"] is None:
             self.draft["due"] = dt.date.today()
         self._rerender_new_task()
@@ -4678,9 +4804,9 @@ class App(tk.Tk):
             if due and due != self.selected:
                 self.select(due)  # 跳到那一天，馬上看得到剛建立的工作
             self.redraw()
-            when = f"，{time_text(time_value)} 提醒" if time_value else ""
+            when = f"，{reminder_text(time_value, draft['lead'])} 提醒" if time_value else ""
             self._set_status(f"已新增「{title}」到「{lst.get('title', '')}」{when}")
-        self._create_task(title, due, time_value, rule, lst, done, body=body)
+        self._create_task(title, due, time_value, rule, lst, done, body=body, lead=draft["lead"])
 
     # ---- 詳細頁（比照 Google Tasks App：標題、詳細資訊、日期、子工作、刪除、標示為完成）
 
@@ -4693,7 +4819,8 @@ class App(tk.Tk):
         if self.detail:
             self.close_detail()  # 從子工作切換時，先儲存目前這筆
         task = self._find_task(task["id"]) or task
-        self.detail = {"task": task, "due": task["due"], "time": task.get("time"), "recur": task.get("recur")}
+        self.detail = {"task": task, "due": task["due"], "time": task.get("time"), "lead": task.get("lead"),
+                       "recur": task.get("recur")}
         self._hide_undo()
         self.main_view.pack_forget()
         self._render_detail()
@@ -4725,9 +4852,10 @@ class App(tk.Tk):
                        lambda: DatePicker(self, btn_due, self.detail["due"], self._set_detail_due),
                        style="soft", padx=10, pady=3)
         btn_due.pack(side="left", padx=(0, px(6)))
-        at = time_text(self.detail["time"])
+        at = reminder_text(self.detail["time"], self.detail["lead"])
         btn_time = Pill(row, f"⏰ {at} ▾" if at else "⏰ 加提醒時間 ▾",
-                        lambda: TimePicker(self, btn_time, self.detail["time"], self._set_detail_time),
+                        lambda: TimePicker(self, btn_time, self.detail["time"], self._set_detail_time,
+                                           lead=self.detail["lead"], on_lead=lambda v: self.detail.update(lead=v)),
                         style="soft", padx=10, pady=3)
         btn_time.pack(side="left")
         if not task.get("parent"):  # 子工作不支援週期
@@ -4820,6 +4948,8 @@ class App(tk.Tk):
 
     def _set_detail_time(self, value):
         self.detail["time"] = value
+        if value is None:
+            self.detail["lead"] = None
         if value and self.detail["due"] is None:  # 提醒需要日期；沒有日期時預設今天
             self.detail["due"] = dt.date.today()
         self._rerender_detail()
@@ -4834,8 +4964,9 @@ class App(tk.Tk):
         notes = self.detail_notes.get("1.0", "end-1c")
         # 比對拆解後的值（而非原始字串），手機上 🔁／⏰ 順序不同但內容未改時不會送出 PATCH
         if (notes != task.get("notes", "") or self.detail["time"] != task.get("time")
-                or self.detail.get("recur") != task.get("recur")):
-            fields["notes"] = join_meta(self.detail["time"], self.detail.get("recur"), notes)
+                or self.detail.get("lead") != task.get("lead") or self.detail.get("recur") != task.get("recur")):
+            fields["notes"] = join_meta(self.detail["time"], self.detail.get("recur"), notes,
+                                        self.detail.get("lead"))
         if self.detail["due"] != task["due"]:
             due = self.detail["due"]
             fields["due"] = due_field(due)
@@ -5118,8 +5249,19 @@ class App(tk.Tk):
             self.after(REMINDER_CHECK_MS, self._check_reminders)
 
     def _fire_due_reminders(self):
-        """時間到的工作在右下角跳出提醒；同一筆只提醒一次（含 DayNote 重開後）。"""
+        """時間到的工作在右下角跳出提醒；同一筆只提醒一次（含 DayNote 重開後）。
+
+        全螢幕或簡報模式中先不跳（也不記為已提醒），離開後的下一次檢查再一起跳。
+        """
         now = dt.datetime.now()
+        if presenting():
+            if not getattr(self, "_holding_reminders", False):
+                self._holding_reminders = True
+                log.info("Reminders held: fullscreen or presentation mode")
+            return
+        if getattr(self, "_holding_reminders", False):
+            self._holding_reminders = False
+            log.info("Reminders released: fullscreen ended")
         changed = False
         for task in list(self.tasks):
             if not (task.get("time") and task["due"]):
@@ -5128,13 +5270,14 @@ class App(tk.Tk):
             key = reminder_key(task["id"], when)
             if key in self.reminded:
                 continue
-            fire_at = self.snoozed.get(key, when)
+            planned = reminder_at(task)
+            fire_at = self.snoozed.get(key, planned)
             if now < fire_at:
                 continue
             self.reminded.add(key)
             self.snoozed.pop(key, None)
             changed = True
-            if now - when > dt.timedelta(hours=REMINDER_MAX_LATE_H) and fire_at == when:
+            if now - when > dt.timedelta(hours=REMINDER_MAX_LATE_H) and fire_at == planned:
                 log.info("Reminder skipped (too late): task=%s scheduled=%s now=%s",
                          task["id"], when.isoformat(), now.isoformat(timespec="seconds"))
                 continue  # 錯過太久（例如關機好幾天）就不補跳
@@ -5357,6 +5500,7 @@ class App(tk.Tk):
                               "list_id": lst["id"], "list_title": lst.get("title", ""),
                               "due": task_due(t), "parent": t.get("parent"),
                               **dict(zip(("time", "recur", "notes"), split_meta(t.get("notes", "")))),
+                              "lead": reminder_lead(t.get("notes", "")),
                               "position": t.get("position", "")})
         year, month = view
         first = dt.date(year, month, 1)
@@ -5466,11 +5610,25 @@ class App(tk.Tk):
                                  state="disabled" if task["due"] == day else "normal")
             menu.add_command(label="選日期…", command=lambda: self._pick_task_date(task, anchor))
             menu.add_separator()
+            if not task.get("recur"):  # 重複待辦改時間會帶到之後每一期，不放在快速選單裡
+                for label, when in remind_later_options(self._now()):
+                    menu.add_command(label=label, command=lambda w=when: self.remind_later(task, w))
+                menu.add_separator()
         menu.add_command(label="完成", command=lambda: self.complete(task))
         menu.add_command(label="開啟詳細資訊", command=lambda: self.open_detail(task))
         menu.add_separator()
         menu.add_command(label="刪除", command=lambda: self.delete_task(task))
         return menu
+
+    def remind_later(self, task, when):
+        """右鍵「稍後提醒」：把提醒設在 when（日期跟著改、準時提醒），可以復原。"""
+        if task not in self.tasks:
+            return
+        fields = {"notes": join_meta(when.time(), task.get("recur"), task.get("notes", ""))}
+        if task["due"] != when.date():
+            fields["due"] = due_field(when.date())
+        day = "" if when.date() == self.today else date_text(when.date())
+        self._send_task_changes([(task, fields)], f"會在{day} {when:%H:%M} 提醒「{task['title']}」", undoable=True)
 
     def _pick_task_date(self, task, anchor):
         """右鍵「選日期…」：在卡片旁開日期選擇器，選了就改日期（可復原）。"""
@@ -5724,6 +5882,7 @@ class App(tk.Tk):
             return
         lst = parsed["list"] or self.current_list()
         due, time_value, rule, title = parsed["due"], parsed["time"], parsed["recur"], parsed["title"]
+        lead = parsed["lead"]
         self.entry.delete(0, "end")
         self._update_quick_chips()
         self._set_status("新增中…")
@@ -5735,13 +5894,13 @@ class App(tk.Tk):
                 self._update_quick_chips()
                 self._show_error(err)
                 return
-            when = f"，{time_text(time_value)} 提醒" if time_value else ""
+            when = f"，{reminder_text(time_value, lead)} 提醒" if time_value else ""
             elsewhere = f"（{date_text(due)}）" if due != self.selected else ""
             self._set_status(f"已新增「{title}」到「{lst.get('title', '')}」{elsewhere}{when}")
             self.redraw()
-        self._create_task(title, due, time_value, rule, lst, done)
+        self._create_task(title, due, time_value, rule, lst, done, lead=lead)
 
-    def _create_task(self, title, due, time_value, rule, lst, on_done, body=""):
+    def _create_task(self, title, due, time_value, rule, lst, on_done, body="", lead=None):
         """（底部輸入列、新增頁與快速列共用）在 Google 建立待辦並加入畫面；完成後呼叫 on_done(畫面上的任務, 錯誤)。"""
         def done(created, err):
             if err:
@@ -5750,10 +5909,10 @@ class App(tk.Tk):
             task = {"id": created["id"], "title": created.get("title") or title,
                     "list_id": lst["id"], "list_title": lst.get("title", ""),
                     "due": task_due(created), "parent": None, "notes": body, "time": time_value,
-                    "recur": rule, "position": created.get("position", "")}
+                    "lead": lead if time_value else None, "recur": rule, "position": created.get("position", "")}
             self.tasks.append(task)
             on_done(task, None)
-        notes = join_meta(time_value, rule, body)
+        notes = join_meta(time_value, rule, body, lead)
         self.run_write(lambda: self.g.add_task(lst["id"], title, due, notes=notes or None), done)
 
     # ---- 快速列（Ctrl + Alt + D）

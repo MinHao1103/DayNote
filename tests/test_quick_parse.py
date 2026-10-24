@@ -287,7 +287,7 @@ class QuickRecurAndListTest(unittest.TestCase):
         # Given / When: 完整寫法
         result = quick("下週一 早上9點 每週一 週會")
         # Then: 都有
-        self.assertEqual(result, {"title": "週會", "due": D(2026, 10, 12), "time": T(9, 0),
+        self.assertEqual(result, {"title": "週會", "due": D(2026, 10, 12), "time": T(9, 0), "lead": None,
                                   "recur": parse("每週一"), "list": None})
 
     def test_recur_glued_to_title_not_parsed(self):
@@ -355,7 +355,8 @@ class QuickRecurAndListTest(unittest.TestCase):
         # Given / When: 純標題
         result = quick("  寫週報  ")
         # Then: 預設值
-        self.assertEqual(result, {"title": "寫週報", "due": TODAY, "time": None, "recur": None, "list": None})
+        self.assertEqual(result, {"title": "寫週報", "due": TODAY, "time": None, "lead": None, "recur": None,
+                                  "list": None})
 
 
 if __name__ == "__main__":

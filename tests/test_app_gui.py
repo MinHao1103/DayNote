@@ -374,6 +374,10 @@ class AppTestCase(unittest.TestCase):
     def start(self, **kw):
         """啟動 App 並等第一次同步完成。"""
         hook = {}
+        # 跑測試時使用者可能剛好全螢幕：預設當作沒有，需要時測試裡再改
+        quiet = unittest.mock.patch.object(daynote, "presenting", lambda: False)
+        quiet.start()
+        self.addCleanup(quiet.stop)
         if not self.first_run:
             with open(os.path.join(self.tmp, "state.json"), "w", encoding="utf-8") as f:
                 json.dump({"tips_shown": True, "compact_calendar": self.compact_calendar}, f)
@@ -2640,6 +2644,146 @@ class ReminderTest(AppTestCase):
         self.assertEqual(self.status(), "10 分鐘後再提醒")
         self.assertEqual(len(app.snoozed), 1)
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "state.json")))
+
+    def test_lead_fires_early(self):
+        """15 分鐘後的待辦設提前 15 分鐘 > 現在就跳提醒，寫「幾分鐘後」；再檢查一次 > 不重複跳"""
+        # Given: 提前提醒時間已到、原本的時間還沒到
+        now = dt.datetime.now()
+        if now.hour == 23 and now.minute >= 40:
+            self.skipTest("午夜交界無法建立「今天稍後」的提醒")
+        at = (now + dt.timedelta(minutes=14)).replace(second=0, microsecond=0)
+        self.g.seed("開會", self.today, notes=f"⏰ {at:%H:%M} 提前15分鐘")
+        app = self.start()
+        # When: 檢查提醒兩次
+        app._check_reminders()
+        reminded = set(app.reminded)
+        app._check_reminders()
+        # Then: 跳出一次，寫還有幾分鐘
+        shown = texts(self.toast().win)
+        self.assertTrue(any(t.startswith(f"⏰ {at:%H:%M}（") and t.endswith("分鐘後）") for t in shown), shown)
+        self.assertEqual(app.reminded, reminded)
+
+    def test_hold_while_presenting(self):
+        """全螢幕／簡報中時間到 > 先不跳、不記為已提醒；離開全螢幕後下一次檢查 > 跳出"""
+        # Given: 一分鐘前該提醒的任務，正在簡報
+        self.seed_due_now()
+        app = self.start()
+        with unittest.mock.patch.object(daynote, "presenting", lambda: True):
+            # When: 檢查提醒
+            with self.assertLogs("daynote", "INFO") as logs:
+                app._check_reminders()
+                app._check_reminders()
+            # Then: 沒跳、只記一次 log
+            self.assertEqual(daynote.ReminderToast.active, [])
+            self.assertEqual(app.reminded, set())
+            self.assertEqual(len(logs.output), 1)
+        # When: 離開全螢幕後檢查
+        app._check_reminders()
+        # Then: 跳出
+        self.assertIn("開會", texts(self.toast().win))
+
+
+class ReminderLeadTest(AppTestCase):
+    """設定提前提醒：時間選擇器的「提前」與快速輸入。"""
+
+    def test_pick_lead_in_detail(self):
+        """詳細頁打開時間選擇器選「10分」 > 膠囊顯示提前 10 分鐘，返回後寫進 Google"""
+        # Given: 15:00 的待辦
+        task_id = self.g.seed("開會", self.today, notes="⏰ 15:00\n帶簡報")
+        app = self.start()
+        app.open_detail(app.tasks[0])
+        app.update()
+        # When: 時間選擇器選提前 10 分鐘
+        click(find_label(app.detail_view, "⏰ 15:00 ▾"))
+        click(find_label(popup(app), "10分"))
+        app.update()
+        # Then: 膠囊與 Google
+        find_label(app.detail_view, "⏰ 15:00 · 提前10分鐘 ▾")
+        app.close_detail()
+        settle(app)
+        self.assertEqual(self.g.tasks[task_id]["notes"], "⏰ 15:00 提前10分鐘\n帶簡報")
+        self.assertEqual(app.tasks[0]["lead"], 10)
+
+    def test_lead_needs_time(self):
+        """新增頁還沒填時間就選「10分」 > 紅字請先輸入時間，不套用"""
+        # Given: 新增頁的時間選擇器
+        app = self.start()
+        click(app.btn_detail)
+        click(find_label(app.detail_view, "⏰ 加提醒時間 ▾"))
+        # When: 選提前
+        click(find_label(popup(app), "10分"))
+        # Then: 提示
+        hint = find_label(popup(app), "請先輸入時間。例如 11、15:30、下午3點，按 Enter 確定")
+        self.assertEqual(hint.cget("fg"), daynote.RED)
+        self.assertIsNone(app.draft["lead"])
+
+    def test_clear_time_clears_lead(self):
+        """有提前提醒的待辦按「不設時間」 > 時間和提前一起清掉"""
+        # Given: 提前 10 分鐘的待辦
+        task_id = self.g.seed("開會", self.today, notes="⏰ 15:00 提前10分鐘")
+        app = self.start()
+        app.open_detail(app.tasks[0])
+        app.update()
+        # When: 不設時間
+        click(find_label(app.detail_view, "⏰ 15:00 · 提前10分鐘 ▾"))
+        click(find_label(popup(app), "不設時間"))
+        app.close_detail()
+        settle(app)
+        # Then: Google 上沒有時間
+        self.assertEqual(self.g.tasks[task_id]["notes"], "")
+
+    def test_quick_add_with_lead(self):
+        """輸入「明天 3點 開會 提前半小時」 > 辨識標籤顯示提前，建立後 Google 上寫著提前30分鐘"""
+        # Given: 主視窗
+        app = self.start()
+        app.entry.focus_force()
+        app.update()
+        app._hide_placeholder()
+        app.entry.insert(0, "明天 3點 開會 提前半小時")
+        app._update_quick_chips()
+        # Then: 標籤
+        self.assertIn("⏰ 15:00 · 提前30分鐘", app.lbl_quick_chips.cget("text"))
+        # When: 新增
+        app.add_task()
+        settle(app)
+        # Then: Google
+        added = next(t for t in self.g.tasks.values() if t["title"] == "開會")
+        self.assertEqual(added["notes"], "⏰ 15:00 提前30分鐘")
+
+
+class RemindLaterTest(AppTestCase):
+    """右鍵「稍後提醒」：不用開詳細頁輸入時間。"""
+
+    def test_remind_tomorrow_morning(self):
+        """沒排日期的待辦選「明天 9:00 提醒」 > 移到明天、09:00 提醒，詳細內文保留；按復原 > 回到原狀"""
+        # Given: 沒排日期、有內文的待辦
+        task_id = self.g.seed("回信給客戶", None, notes="報價單")
+        app = self.start()
+        task = next(t for t in app.tasks if t["id"] == task_id)
+        # When: 右鍵選明天早上
+        app._build_task_menu(task).invoke("明天 9:00 提醒")
+        settle(app)
+        # Then: Google 與狀態列
+        tomorrow = self.today + dt.timedelta(days=1)
+        self.assertEqual(self.g.tasks[task_id]["notes"], "⏰ 09:00\n報價單")
+        self.assertEqual(daynote.task_due(self.g.tasks[task_id]), tomorrow)
+        self.assertTrue(self.status().startswith("會在明天 09:00 提醒「回信給客戶」"), self.status())
+        # When: 復原
+        app.undo()
+        settle(app)
+        # Then: 回到沒日期、沒時間
+        self.assertEqual(self.g.tasks[task_id]["notes"], "報價單")
+        self.assertIsNone(daynote.task_due(self.g.tasks[task_id]))
+
+    def test_recurring_has_no_remind_later(self):
+        """重複待辦 > 右鍵選單沒有「稍後提醒」（改時間會帶到之後每一期）"""
+        # Given: 每天重複
+        self.g.seed("量血壓", self.today, notes="🔁 每天")
+        app = self.start()
+        # When: 建立右鍵選單
+        labels = [i["label"] for i in app._build_task_menu(app.tasks[0]).items]
+        # Then: 沒有
+        self.assertFalse(any(label and label.endswith("提醒") for label in labels), labels)
 
 
 # ---------------------------------------------------------------- 視窗
