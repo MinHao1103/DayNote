@@ -898,6 +898,15 @@ class LinksAndEventsTest(AppTestCase):
         notes.mark_url()
         # Then: 兩段都是連結
         self.assertEqual(len(notes.tag_ranges("url")), 4)
+        # When: 用右鍵選單貼上第三個網址（只有 <<Paste>>、沒有按鍵事件；不碰真的剪貼簿，只跑視窗自己的綁定）
+        notes.insert("end", " https://wiki.example.com/page")
+        tags = notes.bindtags()
+        notes.bindtags((str(notes),))
+        notes.event_generate("<<Paste>>")
+        notes.bindtags(tags)
+        app.update()
+        # Then: 不用再打字就變成連結
+        self.assertEqual(len(notes.tag_ranges("url")), 6)
 
 
 class DragReorderTest(AppTestCase):
@@ -977,6 +986,46 @@ class DragReorderTest(AppTestCase):
         self.assertEqual(app._drag_targets(app._drag), [])
         app._drag_end(0)
 
+    def test_sync_during_drag_waits(self):
+        """拖曳中剛好同步重畫 > 先不重畫（握把還在），放開後照常排序並補畫"""
+        # Given: 三筆，開始拖訂會議室
+        for title in ("寫週報", "回信", "訂會議室"):
+            self.g.seed(title, self.today)
+        app = self.start()
+        app.update()
+        grip = card_of(find_label(app.list_frame, "訂會議室")).grip
+        grip.event_generate("<ButtonPress-1>", x=2, y=2)
+        target = card_of(find_label(app.list_frame, "寫週報"))
+        y = target.winfo_rooty() + 2
+        # When: 拖曳中同步
+        app.refresh()
+        settle(app)
+        # Then: 握把沒被換掉
+        self.assertTrue(grip.winfo_exists())
+        # When: 放開
+        app._drag_end(y)
+        settle(app)
+        # Then: 排到最前面
+        self.assertEqual(self.titles_in_order("寫週報", "回信", "訂會議室"), ["訂會議室", "寫週報", "回信"])
+
+    def test_autoscroll_near_bottom_edge(self):
+        """清單比視窗長，拖到清單下緣 > 自動往下捲"""
+        # Given: 今天很多筆待辦，清單在最上面
+        for i in range(40):
+            self.g.seed(f"待辦{i:02d}", self.today)
+        app = self.start()
+        app.update()
+        self.assertEqual(app.list_canvas.yview()[0], 0.0)
+        card_of(find_label(app.list_frame, "待辦00")).grip.event_generate("<ButtonPress-1>", x=2, y=2)
+        # When: 游標停在清單下緣
+        bottom = app.list_canvas.winfo_rooty() + app.list_canvas.winfo_height() - 2
+        app._drag_move(bottom)
+        settle(app, until=lambda: app.list_canvas.yview()[0] > 0, timeout=2)
+        # Then: 捲下去了
+        self.assertGreater(app.list_canvas.yview()[0], 0.0)
+        app._drag_end(bottom)
+        settle(app)
+
 
 class ListFilterTest(AppTestCase):
     """大日期右邊的「📁 全部清單 ▾」：只看某個清單的待辦。"""
@@ -1031,6 +1080,90 @@ class ListFilterTest(AppTestCase):
         # Then: 照常顯示
         self.assertIn("寫週報", self.list_texts())
         self.assertIsNone(app._list_filter())
+
+    def test_new_task_goes_to_filtered_list(self):
+        """只看「個人」時，上次新增用的是工作 > 新增的待辦放進個人，畫面看得到"""
+        # Given: 上次新增用工作，現在只看個人
+        app = self.start()
+        app.state_data["last_list_id"] = "L1"
+        app._select_remembered_list()
+        app.set_list_filter("L2")
+        # When: 新增
+        self.type_new_task("買牛奶")
+        # Then: 在個人清單、畫面上有
+        added = next(t for t in self.g.tasks.values() if t["title"] == "買牛奶")
+        self.assertEqual(added["list_id"], "L2")
+        self.assertIn("買牛奶", self.list_texts())
+
+
+class ListScrollTest(AppTestCase):
+    """清單重畫時的捲動位置。"""
+
+    def test_redraw_keeps_scroll_position(self):
+        """往下捲之後同步重畫 > 留在原本的位置；換到別天 > 回到最上面"""
+        # Given: 今天很多筆待辦，捲到最下面
+        for i in range(40):
+            self.g.seed(f"待辦{i:02d}", self.today)
+        app = self.start()
+        app.update()
+        app.list_canvas.yview_moveto(1.0)
+        before = app.list_canvas.yview()[0]
+        self.assertGreater(before, 0.0)
+        # When: 同步重畫
+        app.refresh()
+        settle(app)
+        # Then: 位置不變
+        self.assertAlmostEqual(app.list_canvas.yview()[0], before, places=2)
+        # When: 選明天
+        app.select(self.today + dt.timedelta(days=1))
+        app.update()
+        # Then: 回到最上面
+        self.assertEqual(app.list_canvas.yview()[0], 0.0)
+
+
+class SyncRedrawTest(AppTestCase):
+    """同步回來時只在資料有變才重畫清單（Windows 上重畫卡片很慢）。"""
+
+    def test_unchanged_sync_keeps_cards(self):
+        """同步讀到的資料和畫面一樣 > 卡片不重建"""
+        # Given: 今天一筆
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        card = card_of(find_label(app.list_frame, "寫週報"))
+        # When: 再同步一次
+        app.refresh()
+        settle(app)
+        # Then: 還是同一張卡片
+        self.assertTrue(card.winfo_exists())
+        self.assertIs(card_of(find_label(app.list_frame, "寫週報")), card)
+
+    def test_changed_sync_redraws(self):
+        """手機上新增了一筆 > 同步後清單重畫、看得到新的"""
+        # Given: 今天一筆
+        self.g.seed("寫週報", self.today)
+        app = self.start()
+        # When: Google 上多一筆後同步
+        self.g.seed("回信", self.today)
+        app.refresh()
+        settle(app)
+        # Then: 兩筆都在
+        self.assertIn("回信", self.list_texts())
+        self.assertIn("寫週報", self.list_texts())
+
+    def test_task_turning_late_redraws(self):
+        """資料沒變但待辦的時間已過 > 同步後重畫（時間改紅色）"""
+        # Given: 今天 10:00 的待辦，現在 9:59
+        self.g.seed("開會", self.today, notes="⏰ 10:00")
+        clock = {"now": dt.datetime.combine(self.today, dt.time(9, 59))}
+        with unittest.mock.patch.object(daynote.App, "_now", lambda _: clock["now"]):
+            app = self.start()
+            card = card_of(find_label(app.list_frame, "開會"))
+            # When: 時間過了 10:00 再同步
+            clock["now"] = dt.datetime.combine(self.today, dt.time(10, 1))
+            app.refresh()
+            settle(app)
+        # Then: 卡片重畫了
+        self.assertFalse(card.winfo_exists())
 
 
 class SearchTest(AppTestCase):

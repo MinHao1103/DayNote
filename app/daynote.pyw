@@ -85,6 +85,8 @@ CAL_API = "https://www.googleapis.com/calendar/v3"
 DEFAULT_HOLIDAY_CALENDAR = "zh-tw.taiwan#holiday@group.v.calendar.google.com"
 LOGIN_TIMEOUT_SEC = 300
 FOCUS_REFRESH_SEC = 30
+DRAG_STALE_SEC = 60      # 拖曳超過這麼久還沒放開（放開事件遺失），就不再擋同步重畫
+DRAG_SCROLL_MS = 60      # 拖到清單上下緣時，每隔多久捲一格
 
 # 畫面樣式：奶油底＋米色層次，陶土色為強調色，粉彩色只用於圓點、色條等非文字點綴
 # 文字用色（TEXT、GRAY、ACCENT、RED、HOLIDAY_RED）在奶油底上對比皆 ≥ 4.5:1，符合無障礙
@@ -2041,8 +2043,8 @@ def meeting_link(event):
             return uri
     for field in ("location", "description"):
         match = MEETING_URL_RE.search(str(event.get(field, "")))
-        if match:
-            return match.group(0).rstrip(".,;")
+        if match:  # 說明可能是 HTML：href 裡的 & 寫成 &amp;
+            return html.unescape(match.group(0)).rstrip(".,;")
     return None
 
 
@@ -2071,6 +2073,7 @@ def link_urls(text_widget):
     text_widget.tag_bind("url", "<Leave>", lambda e: text_widget.config(cursor="xterm"))
     text_widget.tag_bind("url", "<Button-1>", open_url)
     text_widget.bind("<KeyRelease>", mark, add="+")
+    text_widget.bind("<<Paste>>", lambda e: text_widget.after_idle(mark), add="+")  # 右鍵選單貼上不會有 KeyRelease
     mark()
     text_widget.mark_url = mark  # 測試與重畫時可直接重新標示
 
@@ -3630,10 +3633,18 @@ class App(tk.Tk):
         self.bind_all("<MouseWheel>", lambda e: self.list_canvas.yview_scroll(-e.delta // 120, "units"))
         self.main_view.pack(fill="both", expand=True)  # 最後 pack，狀態列才不會被擠掉
 
-    def redraw(self):
+    def redraw(self, only_if_changed=False):
+        """重畫主畫面。only_if_changed＝清單要顯示的內容和上次畫的一樣就不重畫清單（同步回來資料沒變時）：
+
+        清單每張卡片由好幾個 Tk 元件組成，Windows 上建立／銷毀元件很慢，整個清單重畫要等好一下。
+        """
         self.today = dt.date.today()
         if self.detail or self.draft:  # 詳細頁／新增頁開啟中：不動編輯中的欄位與標題
             return
+        if self._dragging():  # 拖曳中重畫會換掉握把、放開就沒反應：等放開再補畫
+            self._redraw_pending = True
+            return
+        self._redraw_pending = False
         d = self.selected
         self._show_date_hero(d)
         self.btn_compact.config(text="展開整月 ▾" if self.compact else "只看這週 ▴")
@@ -3641,8 +3652,18 @@ class App(tk.Tk):
             self.entry.delete(0, "end")
             self.entry.insert(0, self._placeholder_text())
         self._draw_calendar()
-        self._draw_list()
+        if not (only_if_changed and self._list_signature() == getattr(self, "_list_sig", None)):
+            self._draw_list()
         self._update_next_up()
+
+    def _list_signature(self):
+        """清單畫面由哪些資料決定：日期、搜尋字、各區塊開合、篩選、清單、任務、行程、節日、時間已過的待辦。"""
+        now = self._now()
+        return (id(self.list_frame), bool(self.g.refresh_token), self.selected, self.today,
+                self.search_entry.get().strip() if self.search_bar else None,
+                self.show_overdue, self.show_done, self.show_undated, self._list_filter(),
+                repr(self.lists), repr(self.tasks), repr(self.done_today), repr(self.events.get(self.selected)),
+                repr(self.holidays.get(self.selected)), [t["id"] for t in self.tasks if is_late(t, now)])
 
     def _show_date_hero(self, day):
         """主畫面標題：大日期數字＋星期＋相對日期。"""
@@ -3765,6 +3786,19 @@ class App(tk.Tk):
         self.tk.call("wm", "attributes", popdown, "-topmost", 1)
 
     def _draw_list(self):
+        """重畫清單：換日期、開關搜尋、改搜尋字才回到最上面，其他重畫（勾選、同步、排序）留在原本捲到的位置。"""
+        query = self.search_entry.get().strip() if self.search_bar else None
+        view = (self.selected, query)
+        top = self.list_canvas.yview()[0] if view == getattr(self, "_list_view", None) else 0.0
+        self._list_view = view
+        self._list_sig = self._list_signature()
+        self._draw_list_items()
+        if top:
+            self.list_frame.update_idletasks()  # 先算好新內容的高度，捲動比例才對得上
+            self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all"))
+        self.list_canvas.yview_moveto(top)
+
+    def _draw_list_items(self):
         for widget in self.list_frame.winfo_children():
             widget.destroy()
         self._drag_slots = {}     # 區塊 → [(任務, 卡片)]：拖曳排序時找放下的位置
@@ -3840,7 +3874,6 @@ class App(tk.Tk):
                 for task in undated:
                     self._task_with_children(task)
                 self._drag_section = None
-        self.list_canvas.yview_moveto(0)
 
     def show_event(self, info, anchor):
         """點日曆行程：在卡片下方跳出細節卡片。"""
@@ -3916,7 +3949,6 @@ class App(tk.Tk):
             overdue = task["due"] is not None and task["due"] < self.today
             self._card(task["title"], where, task, subtitle_fg=RED if overdue else GRAY,
                        at=time_text(task.get("time")))
-        self.list_canvas.yview_moveto(0)
 
     def _previews(self, start, end):
         """重複待辦在 [start, end] 預定的日子：{日期: [來源任務]}。
@@ -4164,15 +4196,21 @@ class App(tk.Tk):
             self._add_grip(row, task, drag_section)
 
         def relayout(_=None):
+            """寬度變了：標題換行寬度跟著改，高度留給 _finish_layout 一次算完所有卡片。"""
             width = row.winfo_width()
-            if width < px(50):
-                return
+            if width < px(50) or width == getattr(row, "laid_width", None):
+                return  # 只有高度變（_finish_layout 自己改的）不用重排
+            row.laid_width = width
             lbl_title.config(wraplength=width - px(72) - (lbl_at.winfo_reqwidth() + px(12) if lbl_at else 0)
                              - (lbl_link.winfo_reqwidth() + px(6) if lbl_link else 0))
             row.itemconfigure(window, width=width - 2 * pad_x)
-            inner.update_idletasks()
+            self._queue_layout(row)
+
+        def fit():
+            """依內容高度設定卡片高度並畫圓角底色、握把位置、行程色條。"""
+            width = row.laid_width
             height = inner.winfo_reqheight() + 2 * pad_y + gap
-            row.config(height=height)  # 高度不變時不會再觸發 <Configure>，不會無限迴圈
+            row.config(height=height)
             row.card_size = (width, height - gap)
             self._paint_card(row, row.card_fill)
             row.delete("deco")
@@ -4181,7 +4219,24 @@ class App(tk.Tk):
             if task is None:  # 行程：卡片左側色條，和可勾選的待辦區隔
                 row.create_rectangle(px(5), px(12), px(8), height - gap - px(12), fill=EVENT_DOT, outline="",
                                      tags="deco")
+        row.fit = fit
         row.bind("<Configure>", relayout)
+
+    def _queue_layout(self, row):
+        """卡片寬度變了：排進待算高度的清單，閒置時一次算完（每張各自 update_idletasks 會層層觸發，清單一長就很慢）。"""
+        pending = getattr(self, "_layout_rows", None)
+        if pending is None:
+            pending = self._layout_rows = []
+            self.after_idle(self._finish_layout)
+        pending.append(row)
+
+    def _finish_layout(self):
+        """一次更新所有排版，再依各卡片的內容高度設定卡片高度。"""
+        rows, self._layout_rows = self._layout_rows or [], None
+        self.list_frame.update_idletasks()
+        for row in rows:
+            if row.winfo_exists():
+                row.fit()
 
     def _add_grip(self, row, task, section):
         """卡片左側留白的握把（六個點）：按住拖曳調整順序；只拖握把，點卡片其他地方照舊開詳細頁。"""
@@ -4210,17 +4265,49 @@ class App(tk.Tk):
                 return index
         return len(targets)
 
+    def _dragging(self):
+        """正在拖曳排序（握把還在、沒有拖太久；放開的事件萬一沒收到，過一陣子就不再擋重畫）。"""
+        drag = getattr(self, "_drag", None)
+        return bool(drag and drag["row"].winfo_exists() and time.monotonic() - drag["started"] < DRAG_STALE_SEC)
+
     def _drag_start(self, task, section, row):
         """按住握把：記下拖的是哪一筆、原本排在同清單的第幾個，卡片換成淡強調色。"""
         slots = [t for t, _ in self._drag_slots.get(section, []) if t["list_id"] == task["list_id"]]
-        self._drag = {"task": task, "section": section, "row": row, "origin": slots.index(task)}
+        self._drag = {"task": task, "section": section, "row": row, "origin": slots.index(task),
+                      "started": time.monotonic(), "y": None, "scrolling": False}
         self._paint_card(row, ACCENT_SOFT)
 
+    def _drag_edge(self, y_root):
+        """游標在清單上緣（-1）或下緣（1）的自動捲動區；0＝不用捲。"""
+        canvas = self.list_canvas
+        top, edge = canvas.winfo_rooty(), px(24)
+        if y_root < top + edge:
+            return -1
+        if y_root > top + canvas.winfo_height() - edge:
+            return 1
+        return 0
+
+    def _drag_autoscroll(self):
+        """游標停在清單上下緣時持續捲動，清單比視窗長也能拖到看不到的位置。"""
+        drag = getattr(self, "_drag", None)
+        direction = self._drag_edge(drag["y"]) if drag and drag["y"] is not None else 0
+        if not direction or not self._dragging():
+            if drag:
+                drag["scrolling"] = False
+            return
+        self.list_canvas.yview_scroll(direction, "units")
+        self._drag_move(drag["y"])
+        self.after(DRAG_SCROLL_MS, self._drag_autoscroll)
+
     def _drag_move(self, y_root):
-        """拖曳中：在要放下的位置畫一條強調色的線。"""
+        """拖曳中：在要放下的位置畫一條強調色的線；靠近清單上下緣時自動捲動。"""
         drag = getattr(self, "_drag", None)
         if not drag:
             return
+        drag["y"] = y_root
+        if not drag["scrolling"] and self._drag_edge(y_root):
+            drag["scrolling"] = True
+            self.after(DRAG_SCROLL_MS, self._drag_autoscroll)
         targets = self._drag_targets(drag)
         if not targets:
             return
@@ -4247,10 +4334,16 @@ class App(tk.Tk):
         if drag["row"].winfo_exists():
             self._paint_card(drag["row"], CARD)
         index = self._drag_index(drag, y_root)
-        if index == drag["origin"]:
-            return
         targets = [t for t, _ in self._drag_targets(drag)]
-        self.move_task(drag["task"], targets[index - 1] if index > 0 else None)
+        # 拖曳中若同步過，任務已換成新讀到的資料：依 id 找回目前的那一筆
+        current = {t["id"]: t for t in self.tasks}
+        task = current.get(drag["task"]["id"])
+        previous = current.get(targets[index - 1]["id"]) if index > 0 else None
+        if index == drag["origin"] or task is None or (index > 0 and previous is None):
+            if getattr(self, "_redraw_pending", False):
+                self.redraw()
+            return
+        self.move_task(task, previous)
 
     def _same_list_previous(self, task):
         """同清單最上層任務依 position 排序後，task 的前一筆（None＝它是第一筆）；復原時移回這裡。"""
@@ -4401,7 +4494,7 @@ class App(tk.Tk):
             self._set_status("請先登入 Google（右上角「登入」）" if not self.g.refresh_token
                              else "尚未讀到任何清單，請先同步", error=True)
             return
-        list_index = self.list_index if 0 <= self.list_index < len(self.lists) else 0
+        list_index = self.lists.index(self.current_list())
         due, time_value, rule = self.new_due, None, None
         if title:  # 底部輸入框已經打了「明天 3點 開會」：先辨識，日期時間填進欄位，標題只留文字
             parsed = parse_quick(title, self.lists, dt.date.today(), self._now(), default_due=self.new_due)
@@ -5343,7 +5436,7 @@ class App(tk.Tk):
         self.synced_text = f"已同步 {dt.datetime.now():%H:%M}"
         self._set_status(self.synced_text)
         self._show_first_run_tip()
-        self.redraw()
+        self.redraw(only_if_changed=True)  # 切回視窗就會同步：資料沒變時不重畫清單，避免每次都卡一下
         if view != self.view:  # 讀取期間使用者切換了月份
             self.refresh()
 
@@ -5674,7 +5767,10 @@ class App(tk.Tk):
             self.quick_bar = QuickBar(self)
 
     def current_list(self):
-        """沒有指定 #清單 時使用的清單：上次新增用的（新增頁選過的會記住）。"""
+        """沒有指定 #清單 時使用的清單：正在只看某個清單時就是它（新增後才看得到），否則是上次新增用的。"""
+        filtered = self._list_filter()
+        if filtered:
+            return next(lst for lst in self.lists if lst["id"] == filtered)
         if 0 <= self.list_index < len(self.lists):
             return self.lists[self.list_index]
         return self.lists[0] if self.lists else None

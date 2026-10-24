@@ -104,6 +104,15 @@ class EventInfoTest(unittest.TestCase):
         # Then: Meet
         self.assertEqual(link, "https://meet.google.com/abc-defg-hij")
 
+    def test_html_escaped_meeting_url(self):
+        """Outlook 的 HTML 說明，href 裡的 & 寫成 &amp; > 「加入會議」的網址還原成 &"""
+        # Given: HTML 說明
+        description = '<a href="https://zoom.us/j/123?pwd=abc&amp;from=addon">加入 Zoom 會議</a>'
+        # When: 找會議網址
+        link = daynote.meeting_link({"description": description})
+        # Then: &amp; 還原
+        self.assertEqual(link, "https://zoom.us/j/123?pwd=abc&from=addon")
+
     def test_long_description_truncated(self):
         """說明超過 300 字 > 截斷並加「…」"""
         # Given / When: 很長的說明
