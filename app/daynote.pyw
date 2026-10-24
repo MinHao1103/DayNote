@@ -113,6 +113,7 @@ HELP_SHORTCUTS = (
     ("Ctrl + Alt + D", "在任何程式叫出快速列：新增、看今天、/ 搜尋"),
     ("F8", "顯示／隱藏 DayNote"),
     ("Ctrl + N", "游標移到新增輸入框"),
+    ("Ctrl + F", "搜尋所有未完成的待辦"),
     ("← →", "前一天／後一天"),
     ("↑ ↓", "前一週／後一週"),
     ("Home", "回到今天"),
@@ -2608,9 +2609,8 @@ class QuickBar:
                 self.items = []
                 self.header.config(text="尚未登入 Google：按 Tab 開啟主視窗登入")
             elif mode == "search":
-                query = self.text.get().lstrip()[1:].strip().lower()
-                found = [t for t in app.tasks if query and query in t["title"].lower()]
-                self.items = sorted(found, key=lambda t: (t["due"] is None, t["due"] or today, app._order_key(t)))
+                query = self.text.get().lstrip()[1:].strip()
+                self.items = app.search_tasks(query)
                 self.header.config(text=f"找到 {len(self.items)} 件" if query else "輸入要找的文字")
             else:
                 self.items = app.today_agenda()
@@ -2923,6 +2923,7 @@ class App(tk.Tk):
         self.show_undated = False
         self.show_overdue = True
         self.show_done = False  # 「已完成」區塊預設收合，今天的待辦才是重點
+        self.search_bar = None  # 搜尋中時是搜尋列（Ctrl+F），清單改顯示搜尋結果
         # 預設只顯示這一週，把高度留給今天的清單（比照 Windows 11 工作列月曆、To Do「我的一天」）；
         # 已經存過設定的使用者沿用原本的選擇
         self.compact = bool(self.state_data.get("compact_calendar", True))
@@ -3207,6 +3208,8 @@ class App(tk.Tk):
             self.detail["title_draft"] = self.detail_title.get()
             self.detail["notes_draft"] = self.detail_notes.get("1.0", "end-1c")
         status, status_is_error = self.status.cget("text"), self.status.cget("fg") == RED
+        searching = self.search_entry.get() if self.search_bar else None
+        self.search_bar = None
         self._hide_undo()
         apply_theme(key)
         apply_fonts(self)
@@ -3230,6 +3233,8 @@ class App(tk.Tk):
             self._show_page_title("工作詳細資訊")
         else:
             self.redraw()
+            if searching is not None:
+                self.open_search(searching)
         if self.borderless:
             win_border_color(self, BORDER)
         if status_is_error:  # 錯誤訊息（例如同步失敗）要留著，不被換風格的提示蓋掉
@@ -3632,6 +3637,9 @@ class App(tk.Tk):
         if not self.g.refresh_token:
             self._draw_login_prompt()
             return
+        if self.search_bar:
+            self._draw_search_results()
+            return
         day = self.selected
         events = self.events.get(day, [])
         top_level = self._top_level()
@@ -3692,6 +3700,78 @@ class App(tk.Tk):
             if self.show_undated:
                 for task in undated:
                     self._task_with_children(task)
+        self.list_canvas.yview_moveto(0)
+
+    def search_tasks(self, query):
+        """未完成待辦裡標題或詳細資訊含 query 的（不分大小寫），依日期排序（沒日期的在最後）；空字串回傳空清單。
+
+        主視窗搜尋（Ctrl+F）與快速列的「/」搜尋共用。
+        """
+        query = query.strip().lower()
+        if not query:
+            return []
+        found = [t for t in self.tasks if query in t["title"].lower() or query in (t.get("notes") or "").lower()]
+        today = dt.date.today()
+        return sorted(found, key=lambda t: (t["due"] is None, t["due"] or today, self._order_key(t)))
+
+    def open_search(self, text=""):
+        """Ctrl+F：月曆上方換成搜尋列，清單即時顯示符合的未完成待辦；Esc 或 ✕ 回到原本的畫面。"""
+        if self.detail or self.draft or not self.g.refresh_token:
+            return
+        if self.search_bar:
+            self.search_entry.focus_force()
+            self.search_entry.select_range(0, "end")
+            return
+        self._search_hidden = [(w, w.pack_info()) for w in (self.nav, self.cal)]  # 搜尋時收起月曆，結果空間大一點
+        for widget, _ in self._search_hidden:
+            widget.pack_forget()
+        bar = self.search_bar = RoundedBox(self.main_view, fill=BG, outline=ACCENT, radius=21, padx=10, pady=5)
+        bar.pack(fill="x", padx=px(16), pady=(px(12), px(4)), before=self.list_wrap)
+        close = self._icon_button(bar.inner, "✕", self.close_search, tip="結束搜尋（Esc）")
+        close.pack(side="right")
+        entry = self.search_entry = tk.Entry(bar.inner, font=FONT, relief="flat", bg=BG, fg=TEXT,
+                                             insertbackground=TEXT, highlightthickness=0)
+        entry.pack(side="left", fill="x", expand=True, padx=(px(6), px(6)), ipady=px(3))
+        entry.insert(0, text)
+        entry.bind("<KeyRelease>", lambda e: self._draw_list())
+        entry.bind("<Escape>", lambda e: self.close_search())
+        entry.bind("<Return>", lambda e: self._open_first_result())
+        entry.focus_force()
+        self._draw_list()
+
+    def close_search(self):
+        """結束搜尋：拿掉搜尋列，月曆與當天清單回來。"""
+        if not self.search_bar:
+            return
+        self.search_bar.destroy()
+        self.search_bar = None
+        for widget, info in self._search_hidden:
+            widget.pack(info, before=self.list_wrap)
+        self.redraw()
+        self.cal.focus_set()
+
+    def _open_first_result(self):
+        """搜尋列按 Enter：開第一筆結果的詳細頁。"""
+        found = self.search_tasks(self.search_entry.get())
+        if found:
+            self.open_detail(found[0])
+
+    def _draw_search_results(self):
+        """搜尋結果：每筆顯示日期與清單，點了開詳細頁（和一般卡片一樣可以勾選完成、按右鍵）。"""
+        query = self.search_entry.get().strip()
+        found = self.search_tasks(query)
+        if not query:
+            tk.Label(self.list_frame, text="輸入關鍵字，搜尋所有未完成的待辦（標題與詳細資訊）", bg=BG, fg=GRAY,
+                     font=SMALL).pack(pady=(px(14), 0))
+        elif not found:
+            tk.Label(self.list_frame, text=f"找不到「{query}」", bg=BG, fg=GRAY, font=FONT).pack(pady=(px(14), 0))
+        else:
+            self._section_header(f"搜尋結果（{len(found)}）", True, None, fg=TEXT)
+        for task in found:
+            where = " · ".join(p for p in (date_text(task["due"]), task["list_title"]) if p)
+            overdue = task["due"] is not None and task["due"] < self.today
+            self._card(task["title"], where, task, subtitle_fg=RED if overdue else GRAY,
+                       at=time_text(task.get("time")))
         self.list_canvas.yview_moveto(0)
 
     def _previews(self, start, end):
@@ -4693,6 +4773,8 @@ class App(tk.Tk):
         self.bind("<Control-N>", lambda e: self.detail or self.draft or self.entry.focus_force())
         self.bind("<F5>", lambda e: self.refresh())
         self.bind("<F1>", lambda e: self.open_help())
+        for key in ("<Control-f>", "<Control-F>"):
+            self.bind(key, lambda e: self.open_search())
         # Ctrl+Z 等同按狀態列的「復原」；輸入框裡保留文字本身的復原
         for key in ("<Control-z>", "<Control-Z>"):
             self.bind(key, lambda e: None if isinstance(self.focus_get(), (tk.Entry, tk.Text)) else self.undo())
@@ -4816,6 +4898,7 @@ class App(tk.Tk):
             return
         self.close_detail()  # 詳細頁有修改時先儲存
         self._commit_delete()  # 還在復原時間內的刪除：登出前送出
+        self.close_search()
         self.cancel_new_task(ask=False)  # 已確認登出，新增頁一併關閉
         self.busy = True
         self._set_status("正在登出…")

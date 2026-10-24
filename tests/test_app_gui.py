@@ -808,6 +808,72 @@ class StartupTest(AppTestCase):
         self.assertEqual(app.tasks, [])
 
 
+class SearchTest(AppTestCase):
+    """主視窗搜尋（Ctrl+F）：所有未完成待辦，不限日期。"""
+
+    def type_search(self, text):
+        self.app.search_entry.delete(0, "end")
+        self.app.search_entry.insert(0, text)
+        self.app._draw_list()  # 等同打字時的 <KeyRelease>（鍵盤事件要有焦點才送得到，測試不依賴焦點）
+        self.app.update()
+
+    def test_search_across_days_and_notes(self):
+        """Ctrl+F 搜「報」 > 列出不同天、標題或詳細資訊含「報」的待辦，依日期排序；月曆收起"""
+        # Given: 今天、下週、無日期各一筆，另一筆只有詳細資訊含關鍵字
+        self.g.seed("寫週報", self.today + dt.timedelta(days=7))
+        self.g.seed("交報告", self.today)
+        self.g.seed("買牛奶", None)
+        self.g.seed("回信", None, notes="附上報價單")
+        app = self.start()
+        # When: 開搜尋並輸入
+        press_key(app, "<Control-f>")
+        app.update()
+        self.type_search("報")
+        # Then: 三筆、依日期（沒日期的最後），月曆收起
+        shown = self.list_texts()
+        self.assertIn("搜尋結果（3）", shown)
+        order = [t for t in ("交報告", "寫週報", "回信") if t in shown]
+        self.assertEqual(order, ["交報告", "寫週報", "回信"])
+        self.assertLess(shown.index("交報告"), shown.index("寫週報"))
+        self.assertLess(shown.index("寫週報"), shown.index("回信"))
+        self.assertNotIn("買牛奶", shown)
+        self.assertFalse(app.cal.winfo_ismapped())
+
+    def test_search_enter_opens_first_and_esc_restores(self):
+        """搜尋列按 Enter > 開第一筆的詳細頁；返回後按 Esc > 結束搜尋，月曆回來"""
+        # Given: 一筆待辦，搜尋中
+        self.g.seed("交報告", self.today)
+        app = self.start()
+        app.open_search()
+        self.type_search("報告")
+        # When: Enter
+        app.search_entry.event_generate("<Return>")
+        app.update()
+        # Then: 開了詳細頁
+        self.assertEqual(app.detail["task"]["title"], "交報告")
+        # When: 返回，再按 Esc
+        app.close_detail()
+        settle(app)
+        self.assertIn("搜尋結果（1）", self.list_texts())
+        app.search_entry.event_generate("<Escape>")
+        app.update()
+        # Then: 搜尋結束，月曆與今天的清單回來
+        self.assertIsNone(app.search_bar)
+        self.assertTrue(app.cal.winfo_ismapped())
+        self.assertIn("今天（1）", self.list_texts())
+
+    def test_search_no_match(self):
+        """搜不到 > 顯示「找不到」"""
+        # Given: 一筆待辦
+        self.g.seed("交報告", self.today)
+        app = self.start()
+        # When: 搜不存在的字
+        app.open_search()
+        self.type_search("不存在")
+        # Then: 找不到
+        self.assertIn("找不到「不存在」", self.list_texts())
+
+
 class DoneSectionTest(AppTestCase):
     """今天完成的待辦收在清單底部的「已完成」區塊，可以改回未完成。"""
 
