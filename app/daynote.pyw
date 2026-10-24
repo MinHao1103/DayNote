@@ -929,6 +929,11 @@ class Google:
         """部分更新（標題、詳細資訊、日期）；欄位值為 None 代表清除。"""
         return self.api("PATCH", f"{TASKS_API}/lists/{_q(list_id)}/tasks/{_q(task_id)}", body=fields)
 
+    def move_task(self, list_id, task_id, previous=None):
+        """調整順序：移到同清單 previous 那筆的後面（None＝移到清單最前面）；回傳更新後的任務（含新 position）。"""
+        params = {"previous": previous} if previous else None
+        return self.api("POST", f"{TASKS_API}/lists/{_q(list_id)}/tasks/{_q(task_id)}/move", params=params)
+
     def delete_task(self, list_id, task_id):
         self.api("DELETE", f"{TASKS_API}/lists/{_q(list_id)}/tasks/{_q(task_id)}")
 
@@ -3762,6 +3767,8 @@ class App(tk.Tk):
     def _draw_list(self):
         for widget in self.list_frame.winfo_children():
             widget.destroy()
+        self._drag_slots = {}     # 區塊 → [(任務, 卡片)]：拖曳排序時找放下的位置
+        self._drag_section = None  # 目前正在畫的區塊；None＝這一區不能拖（逾期、搜尋結果）
         if not self.g.refresh_token:
             self._draw_login_prompt()
             return
@@ -3798,11 +3805,13 @@ class App(tk.Tk):
         timeline = [((0, dt.time.min) if event[0] == "全天" else (1, parse_time_text(event[0]) or dt.time.min), event, None)
                     for event in events]
         timeline += [((1, t["time"]) if t.get("time") else (2, dt.time.min), None, t) for t in tasks]
+        self._drag_section = "day"  # 當天沒設時間的待辦可以拖曳排序
         for _, event, task in sorted(timeline, key=lambda item: item[0]):  # sorted 穩定：同時間時行程在前
             if task:
                 self._task_with_children(task)
             else:
                 self._card(event[1], "Google 日曆", None, at=event[0], event=event[2])
+        self._drag_section = None
         for task in previews:
             self._preview_card(task)
         done = (sorted(self._shown(self.done_today), key=lambda t: t["completed"] or dt.datetime.min)
@@ -3827,8 +3836,10 @@ class App(tk.Tk):
         if undated:
             self._section_header(f"未排日期（{len(undated)}）", self.show_undated, self._toggle_undated)
             if self.show_undated:
+                self._drag_section = "undated"
                 for task in undated:
                     self._task_with_children(task)
+                self._drag_section = None
         self.list_canvas.yview_moveto(0)
 
     def show_event(self, info, anchor):
@@ -4066,9 +4077,11 @@ class App(tk.Tk):
         children = self._children(task)
         # 父工作和子工作之間只留細縫，最後一個子工作才恢復一般間距，一眼看出是同一組
         tight = px(2)
+        # 沒設時間的待辦才能拖：有時間的固定照時間排，拖了也不會變
+        section = self._drag_section if not task.get("time") else None
         self._card(task["title"], task_subtitle(task, self.today), task, subtitle_fg=RED if overdue else GRAY,
                    at="" if overdue else time_text(task.get("time")), at_fg=RED if is_late(task, now) else GRAY,
-                   gap=tight if children else None)
+                   gap=tight if children else None, drag_section=section)
         for index, child in enumerate(children):
             # 子任務不顯示清單名稱（和父任務相同），比照 Google Tasks 精簡顯示；有時間才顯示在右側
             self._card(child["title"], "", child, indent=True, at=time_text(child.get("time")),
@@ -4076,7 +4089,7 @@ class App(tk.Tk):
                        gap=tight if index < len(children) - 1 else None)
 
     def _card(self, title, subtitle, task, indent=False, subtitle_fg=None, at="", at_fg=None, gap=None, done=False,
-              event=None):
+              event=None, drag_section=None):
         """清單中的一筆：圓角卡片浮在底色上，卡片之間留空隙（取代分隔線）；滑過時卡片變色。
 
         task 為 None 時是日曆行程：卡片左側色條，圓圈位置留空，只顯示、不可勾選。indent＝子工作縮排。
@@ -4084,6 +4097,7 @@ class App(tk.Tk):
         gap＝和下一張卡片的空隙；父工作與子工作之間縮小空隙，看起來是同一組。
         done＝已完成區塊的卡片：實心打勾圓圈（點了改回未完成）、灰色標題、不開詳細頁。
         event＝行程細節（event_info）：點了跳出小卡片顯示時間、地點、說明與加入會議。
+        drag_section＝可拖曳排序時所屬的區塊：卡片左側留白畫握把，按住拖到同清單其他待辦之間。
         """
         subtitle_fg, at_fg = subtitle_fg or GRAY, at_fg or GRAY
         row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(50))
@@ -4146,6 +4160,9 @@ class App(tk.Tk):
         for widget in (row, *_descendants(row)):
             widget.bind("<Leave>", lambda e: self._leave_row(row, e), add="+")
 
+        if drag_section and task:
+            self._add_grip(row, task, drag_section)
+
         def relayout(_=None):
             width = row.winfo_width()
             if width < px(50):
@@ -4159,10 +4176,113 @@ class App(tk.Tk):
             row.card_size = (width, height - gap)
             self._paint_card(row, row.card_fill)
             row.delete("deco")
+            if getattr(row, "grip", None):
+                row.coords(row.grip_window, px(1), (height - gap) // 2)
             if task is None:  # 行程：卡片左側色條，和可勾選的待辦區隔
                 row.create_rectangle(px(5), px(12), px(8), height - gap - px(12), fill=EVENT_DOT, outline="",
                                      tags="deco")
         row.bind("<Configure>", relayout)
+
+    def _add_grip(self, row, task, section):
+        """卡片左側留白的握把（六個點）：按住拖曳調整順序；只拖握把，點卡片其他地方照舊開詳細頁。"""
+        self._drag_slots.setdefault(section, []).append((task, row))
+        grip = tk.Canvas(row, width=px(10), height=px(18), bg=CARD, highlightthickness=0, cursor="fleur")
+        for x in (px(3), px(7)):
+            for y in (px(4), px(9), px(14)):
+                grip.create_oval(x - 1, y - 1, x + 1, y + 1, fill=FADED_TEXT, outline="")
+        row.grip = grip
+        row.grip_window = row.create_window(px(1), px(25), window=grip, anchor="w")
+        grip.bind("<ButtonPress-1>", lambda e: self._drag_start(task, section, row))
+        grip.bind("<B1-Motion>", lambda e: self._drag_move(e.y_root))
+        grip.bind("<ButtonRelease-1>", lambda e: self._drag_end(e.y_root))
+        Tooltip(grip, "拖曳調整順序（同一個清單內）")
+
+    def _drag_targets(self, drag):
+        """拖曳中的待辦可以放的位置：同區塊、同清單的其他可拖曳卡片，依畫面順序。"""
+        return [(t, row) for t, row in self._drag_slots.get(drag["section"], [])
+                if t["list_id"] == drag["task"]["list_id"] and t is not drag["task"] and row.winfo_exists()]
+
+    def _drag_index(self, drag, y_root):
+        """游標在第幾張目標卡片之前（等於目標數＝最後面）。"""
+        targets = self._drag_targets(drag)
+        for index, (_, row) in enumerate(targets):
+            if y_root < row.winfo_rooty() + row.winfo_height() // 2:
+                return index
+        return len(targets)
+
+    def _drag_start(self, task, section, row):
+        """按住握把：記下拖的是哪一筆、原本排在同清單的第幾個，卡片換成淡強調色。"""
+        slots = [t for t, _ in self._drag_slots.get(section, []) if t["list_id"] == task["list_id"]]
+        self._drag = {"task": task, "section": section, "row": row, "origin": slots.index(task)}
+        self._paint_card(row, ACCENT_SOFT)
+
+    def _drag_move(self, y_root):
+        """拖曳中：在要放下的位置畫一條強調色的線。"""
+        drag = getattr(self, "_drag", None)
+        if not drag:
+            return
+        targets = self._drag_targets(drag)
+        if not targets:
+            return
+        index = self._drag_index(drag, y_root)
+        if index < len(targets):
+            y = targets[index][1].winfo_y() - px(3)
+        else:
+            last = targets[-1][1]
+            y = last.winfo_y() + last.winfo_height() - px(3)
+        line = getattr(self, "drop_line", None)
+        if not line or not line.winfo_exists():
+            line = self.drop_line = tk.Frame(self.list_frame, bg=ACCENT, height=px(3))
+        line.place(x=0, y=y, relwidth=1)
+        line.lift()
+
+    def _drag_end(self, y_root):
+        """放開：位置有變才排到新的前一筆後面（放回原位不送出）。"""
+        drag, self._drag = getattr(self, "_drag", None), None
+        line = getattr(self, "drop_line", None)
+        if line and line.winfo_exists():
+            line.place_forget()
+        if not drag:
+            return
+        if drag["row"].winfo_exists():
+            self._paint_card(drag["row"], CARD)
+        index = self._drag_index(drag, y_root)
+        if index == drag["origin"]:
+            return
+        targets = [t for t, _ in self._drag_targets(drag)]
+        self.move_task(drag["task"], targets[index - 1] if index > 0 else None)
+
+    def _same_list_previous(self, task):
+        """同清單最上層任務依 position 排序後，task 的前一筆（None＝它是第一筆）；復原時移回這裡。"""
+        ordered = sorted((t for t in self._top_level() if t["list_id"] == task["list_id"]),
+                         key=lambda t: t.get("position", ""))
+        index = next((i for i, t in enumerate(ordered) if t is task), 0)
+        return ordered[index - 1] if index > 0 else None
+
+    def move_task(self, task, previous, undoable=True):
+        """把 task 排到同清單 previous 的後面（None＝最前面）：先改畫面，背景送到 Google，可以復原。"""
+        if task not in self.tasks:
+            return
+        before = self._same_list_previous(task)
+        old_position = task.get("position", "")
+        # 先在本機排好：前一筆的 position 後面加一個比數字大的字元，就會排在它和下一筆之間
+        task["position"] = previous.get("position", "") + "~" if previous else ""
+        self.redraw()
+
+        def done(result, err):
+            if err:
+                task["position"] = old_position
+                self.redraw()
+                self._show_error(err)
+                return
+            if result and result.get("position"):
+                task["position"] = result["position"]
+            if undoable:
+                self._offer_undo_action(f"已調整「{task['title']}」的順序",
+                                        lambda: self.move_task(task, before, undoable=False))
+            else:
+                self._set_status(f"已復原「{task['title']}」的順序")
+        self.run_write(lambda: self.g.move_task(task["list_id"], task["id"], previous["id"] if previous else None), done)
 
     def _paint_card(self, row, fill):
         """重畫卡片底色（圓角）並把卡片內容的底色一起換掉。"""

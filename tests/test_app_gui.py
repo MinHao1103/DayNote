@@ -117,6 +117,18 @@ class StoreGoogle:
         self._hit("delete_task")
         self.tasks[task_id]["deleted"] = True
 
+    def move_task(self, list_id, task_id, previous=None):
+        """比照 tasks.move：排到 previous 後面（None＝最前面），回傳含新 position 的任務。"""
+        self._hit("move_task")
+        with self._lock:
+            ordered = sorted((t for t in self.tasks.values() if t["list_id"] == list_id and not t.get("parent")
+                              and t["id"] != task_id), key=lambda t: t["position"])
+            index = next((i + 1 for i, t in enumerate(ordered) if t["id"] == previous), 0)
+            ordered.insert(index, self.tasks[task_id])
+            for number, t in enumerate(ordered, start=1):
+                t["position"] = f"{number:03d}"
+            return self._api(self.tasks[task_id])
+
     def complete_task(self, list_id, task_id):
         self._hit("complete_task")
         self.tasks[task_id].update(status="completed", completed_at=dt.datetime.now())
@@ -886,6 +898,84 @@ class LinksAndEventsTest(AppTestCase):
         notes.mark_url()
         # Then: 兩段都是連結
         self.assertEqual(len(notes.tag_ranges("url")), 4)
+
+
+class DragReorderTest(AppTestCase):
+    """卡片左側握把：拖曳調整同清單、沒設時間的待辦順序。"""
+
+    def titles_in_order(self, *titles):
+        shown = self.list_texts()
+        return sorted(titles, key=shown.index)
+
+    def drag(self, title, onto_title, below=False):
+        """按住 title 的握把，拖到 onto_title 卡片的上半（below=True：下半）放開。"""
+        app = self.app
+        app.update()
+        grip = card_of(find_label(app.list_frame, title)).grip
+        target = card_of(find_label(app.list_frame, onto_title))
+        y = target.winfo_rooty() + (target.winfo_height() * 3 // 4 if below else 2)
+        grip.event_generate("<ButtonPress-1>", x=2, y=2)
+        app._drag_move(y)
+        app.update()
+        line_shown = app.drop_line.winfo_ismapped()
+        app._drag_end(y)
+        settle(app)
+        return line_shown
+
+    def test_drag_to_top(self):
+        """把第三筆拖到第一筆上面 > 畫面順序改變、Google 上也排到最前面；拖曳中顯示放下位置的線"""
+        # Given: 同清單、沒設時間的三筆
+        for title in ("寫週報", "回信", "訂會議室"):
+            self.g.seed(title, self.today)
+        app = self.start()
+        # When: 訂會議室拖到寫週報上面
+        line_shown = self.drag("訂會議室", "寫週報")
+        # Then: 順序與 Google
+        self.assertTrue(line_shown)
+        self.assertEqual(self.titles_in_order("寫週報", "回信", "訂會議室"), ["訂會議室", "寫週報", "回信"])
+        google = sorted(self.g.tasks.values(), key=lambda t: t["position"])
+        self.assertEqual([t["title"] for t in google], ["訂會議室", "寫週報", "回信"])
+        self.assertTrue(app.btn_undo.winfo_ismapped())
+
+    def test_drag_undo(self):
+        """拖曳後按「復原」 > 回到原本的順序"""
+        # Given: 三筆，把第一筆拖到最後
+        for title in ("寫週報", "回信", "訂會議室"):
+            self.g.seed(title, self.today)
+        app = self.start()
+        self.drag("寫週報", "訂會議室", below=True)
+        self.assertEqual(self.titles_in_order("寫週報", "回信", "訂會議室"), ["回信", "訂會議室", "寫週報"])
+        # When: 復原
+        app.undo()
+        settle(app)
+        # Then: 原順序
+        self.assertEqual(self.titles_in_order("寫週報", "回信", "訂會議室"), ["寫週報", "回信", "訂會議室"])
+
+    def test_drop_in_place_does_nothing(self):
+        """拖了又放回原位 > 不送出"""
+        # Given: 兩筆
+        self.g.seed("寫週報", self.today)
+        self.g.seed("回信", self.today)
+        self.start()
+        # When: 寫週報放回自己原本的位置（回信的上面）
+        self.drag("寫週報", "回信")
+        # Then: 沒有呼叫 move
+        self.assertNotIn("move_task", self.g.calls)
+
+    def test_only_untimed_same_list_draggable(self):
+        """有時間的待辦沒有握把；拖曳只會停在同清單的待辦之間"""
+        # Given: 工作兩筆（其中一筆有時間）、個人一筆
+        self.g.seed("開會", self.today, notes="⏰ 23:59")
+        self.g.seed("寫週報", self.today)
+        self.g.seed("買牛奶", self.today, list_id="L2")
+        app = self.start()
+        # Then: 有時間的沒有握把
+        self.assertFalse(hasattr(card_of(find_label(app.list_frame, "開會")), "grip"))
+        # When: 開始拖寫週報
+        card_of(find_label(app.list_frame, "寫週報")).grip.event_generate("<ButtonPress-1>", x=2, y=2)
+        # Then: 沒有同清單的其他可拖曳待辦可以放
+        self.assertEqual(app._drag_targets(app._drag), [])
+        app._drag_end(0)
 
 
 class ListFilterTest(AppTestCase):
