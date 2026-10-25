@@ -3921,8 +3921,25 @@ class App(tk.Tk):
         self.list_canvas.yview_moveto(top)
 
     def _draw_list_items(self):
+        """重畫清單內容。上次畫過、內容和樣式都沒變的卡片留著，只搬到新的位置，不砍掉重建：
+
+        Windows 上每個 Tk 元件建立／銷毀都要 1～3 毫秒，勾選一筆就整個清單重建要等快一秒。
+        區塊標題、說明文字等其他元件數量少，照舊每次重建。
+        """
+        self._card_reuse, self._card_cache = getattr(self, "_card_cache", {}), {}
+        kept = set(self._card_reuse.values())
         for widget in self.list_frame.winfo_children():
-            widget.destroy()
+            if widget not in kept:
+                widget.destroy()
+        try:
+            self._draw_list_content()
+        finally:
+            for row in self._card_reuse.values():  # 這次沒畫到的卡片
+                if row.winfo_exists():
+                    row.destroy()
+            self._card_reuse = {}
+
+    def _draw_list_content(self):
         self._drag_slots = {}     # 區塊 → [(任務, 卡片)]：拖曳排序時找放下的位置
         self._drag_section = None  # 目前正在畫的區塊；None＝這一區不能拖（逾期、搜尋結果）
         if not self.g.refresh_token:
@@ -4253,18 +4270,26 @@ class App(tk.Tk):
         event＝行程細節（event_info）：點了跳出小卡片顯示時間、地點、說明與加入會議。
         drag_section＝可拖曳排序時所屬的區塊：卡片左側留白畫握把，按住拖到同清單其他待辦之間。
         """
+        count = len(self._children(task)) if task and not done else 0
+        # 同一筆任務（同一個 dict，按鈕綁的就是它）且畫出來的一切都相同，才沿用上次的卡片
+        key = (id(task), repr(task), title, subtitle, indent, subtitle_fg, at, at_fg, gap, done, repr(event),
+               drag_section, count)
+        row = self._card_reuse.pop(key, None)
+        if row is not None and row.winfo_exists() and not getattr(row, "clicked", False):
+            self._reuse_card(row, key, task, drag_section)
+            return
         subtitle_fg, at_fg = subtitle_fg or GRAY, at_fg or GRAY
         row = tk.Canvas(self.list_frame, bg=BG, highlightthickness=0, height=px(50))
         row.pack(fill="x", padx=(CHILD_INDENT if indent else 0, px(2)))
         row.card_fill = CARD
+        self._card_cache[key] = row
         inner = tk.Frame(row, bg=CARD)
         if task and done:
             circle = self._done_circle(inner, task, bg=CARD)
             circle.pack(side="left", padx=(0, px(10)))
         elif task:
-            circle = self._check_circle(inner, task, bg=CARD)
+            circle = self._check_circle(inner, task, bg=CARD, on_click=lambda: setattr(row, "clicked", True))
             circle.pack(side="left", padx=(0, px(10)))
-            count = len(self._children(task))
             Tooltip(circle, f"標記為完成（含 {count} 個子工作）" if count else "標記為完成")
         else:
             # 行程沒有完成圓圈；留同寬的空位，標題才會和待辦對齊
@@ -4343,6 +4368,17 @@ class App(tk.Tk):
                                      tags="deco")
         row.fit = fit
         row.bind("<Configure>", relayout)
+
+    def _reuse_card(self, row, key, task, drag_section):
+        """沿用上次畫的卡片：搬到目前清單的最後面（照這次畫的順序排），恢復一般底色，重新登記拖曳位置。"""
+        self._card_cache[key] = row
+        slaves = self.tk.splitlist(self.tk.call("pack", "slaves", self.list_frame))
+        if slaves and str(slaves[-1]) != str(row):
+            row.pack_configure(after=str(slaves[-1]))  # 已經 pack 的元件只換位置，不必重新顯示
+        if row.card_fill != CARD:  # 上次畫的時候滑鼠停在上面
+            self._paint_card(row, CARD)
+        if drag_section and task:
+            self._drag_slots.setdefault(drag_section, []).append((task, row))
 
     def _queue_layout(self, row):
         """卡片寬度變了：排進待算高度的清單，閒置時一次算完（每張各自 update_idletasks 會層層觸發，清單一長就很慢）。"""
@@ -4515,8 +4551,8 @@ class App(tk.Tk):
         if not (0 <= x < row.winfo_width() and 0 <= y < row.winfo_height()):
             self._paint_card(row, CARD)
 
-    def _check_circle(self, parent, task, bg=None):
-        """To Do 風格的圓圈：滑鼠移上去顯示 ✓，點擊後填滿並標記完成。"""
+    def _check_circle(self, parent, task, bg=None, on_click=None):
+        """To Do 風格的圓圈：滑鼠移上去顯示 ✓，點擊後填滿並標記完成。on_click＝點下時先通知（卡片不再沿用）。"""
         bg = bg or CARD_BG
         size, mid = px(22), px(22) / 2
         c = tk.Canvas(parent, width=size, height=size, bg=bg, highlightthickness=0, cursor="hand2")
@@ -4533,6 +4569,8 @@ class App(tk.Tk):
         c.bind("<Leave>", lambda e: c.delete("tick"))
 
         def done(_):
+            if on_click:
+                on_click()
             c.unbind("<Button-1>")  # 防止連點重複送出
             c.unbind("<Leave>")
             c.delete("tick")

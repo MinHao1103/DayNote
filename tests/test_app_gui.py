@@ -917,8 +917,9 @@ class DragReorderTest(AppTestCase):
     """卡片左側握把：拖曳調整同清單、沒設時間的待辦順序。"""
 
     def titles_in_order(self, *titles):
-        shown = self.list_texts()
-        return sorted(titles, key=shown.index)
+        """依卡片在畫面上的位置（由上而下）排序；沒變的卡片會沿用、只換位置，建立順序不等於畫面順序。"""
+        self.app.update_idletasks()
+        return sorted(titles, key=lambda title: card_of(find_label(self.app.list_frame, title)).winfo_y())
 
     def drag(self, title, onto_title, below=False):
         """按住 title 的握把，拖到 onto_title 卡片的上半（below=True：下半）放開。"""
@@ -1168,6 +1169,48 @@ class SyncRedrawTest(AppTestCase):
             settle(app)
         # Then: 卡片重畫了
         self.assertFalse(card.winfo_exists())
+
+
+class CardReuseTest(AppTestCase):
+    """重畫清單時沿用沒變的卡片（只換位置），變了的才重建。"""
+
+    def card_y(self, title):
+        self.app.update_idletasks()
+        return card_of(find_label(self.app.list_frame, title)).winfo_y()
+
+    def test_complete_keeps_other_cards(self):
+        """勾選完成一筆 > 其他卡片沿用同一張、順序不變，「已完成」區塊排在它們下方"""
+        # Given: 今天三筆
+        for title in ("寫週報", "回信", "訂會議室"):
+            self.g.seed(title, self.today)
+        app = self.start()
+        reply = card_of(find_label(app.list_frame, "回信"))
+        # When: 勾選第一筆
+        click(circle_of(app, "寫週報"))
+        pump(app, 0.4)
+        settle(app)
+        # Then: 其他卡片沿用、由上而下是回信、訂會議室、「已完成」區塊
+        self.assertIs(card_of(find_label(app.list_frame, "回信")), reply)
+        self.assertLess(find_label(app.list_frame, "今天（", exact=False).master.winfo_y(), self.card_y("回信"))
+        self.assertLess(self.card_y("回信"), self.card_y("訂會議室"))
+        self.assertLess(self.card_y("訂會議室"), find_label(app.list_frame, "已完成", exact=False).master.winfo_y())
+
+    def test_failed_complete_can_retry(self):
+        """完成失敗放回清單 > 卡片重建，圓圈可以再點一次完成"""
+        # Given: 第一次完成會失敗
+        task_id = self.g.seed("寫週報", self.today)
+        app = self.start()
+        self.g.fail.add("complete_task")
+        click(circle_of(app, "寫週報"))
+        pump(app, 0.4)
+        settle(app)
+        self.g.fail.discard("complete_task")
+        # When: 再點一次圓圈
+        click(circle_of(app, "寫週報"))
+        pump(app, 0.4)
+        settle(app)
+        # Then: 這次完成了
+        self.assertEqual(self.g.tasks[task_id]["status"], "completed")
 
 
 class SearchTest(AppTestCase):
